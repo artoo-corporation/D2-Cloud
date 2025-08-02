@@ -38,5 +38,62 @@ async def get_supabase_async() -> AsyncGenerator[AsyncClient, None]:
     try:
         yield client
     finally:
-        # Ensure underlying HTTPX session is closed
-        await client.aclose() 
+        # Close Supabase HTTPX session if the current library exposes a coroutine
+        close_coro = getattr(client, "aclose", None)
+        if callable(close_coro):
+            await close_coro()          # modern supabase-py (>=2.2)
+        # Older versions don’t leak badly on serverless cold-starts, so we skip.
+
+
+# ---------------------------------------------------------------------------
+# Token-based auth helpers (opaque D2 tokens only)
+# ---------------------------------------------------------------------------
+
+from fastapi import Header, Depends, HTTPException, status
+from app.utils.security_utils import verify_api_token
+from app.utils.security_utils import verify_supabase_jwt
+
+
+async def require_token(
+    authorization: str = Header(...),
+    supabase = Depends(get_supabase_async),
+):
+    """Dependency that verifies a *read* (or admin) D2 token and returns account_id."""
+
+    token = authorization.split(" ")[-1]
+    try:
+        return await verify_api_token(token, supabase, admin_only=False)
+    except HTTPException:
+        raise
+
+
+async def require_token_admin(
+    authorization: str = Header(...),
+    supabase = Depends(get_supabase_async),
+):
+    token = authorization.split(" ")[-1]
+    return await verify_api_token(token, supabase, admin_only=True)
+
+
+# ---------------------------------------------------------------------------
+# Mixed auth – either Supabase admin JWT  OR D2 admin token
+# ---------------------------------------------------------------------------
+
+
+async def require_account_admin(
+    authorization: str = Header(...),
+    supabase = Depends(get_supabase_async),
+) -> str:
+    """Return account_id when caller is admin via either auth mechanism."""
+
+    token = authorization.split(" ")[-1]
+
+    # Try Supabase admin JWT first
+    try:
+        return await verify_supabase_jwt(token, admin_only=True)
+    except HTTPException as exc:
+        if exc.status_code not in {401, 403}:
+            raise
+
+    # Fallback to opaque D2 admin token
+    return await verify_api_token(token, supabase, admin_only=True)

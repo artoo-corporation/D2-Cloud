@@ -1,0 +1,143 @@
+from __future__ import annotations
+
+"""Unified models namespace – contains both API (request/response) and DB models.
+
+All FastAPI route models, enums and helpers live directly in this package so
+call-sites can simply::
+
+    from app.models import PolicyBundleResponse, PlanTier, APITokenResponse
+
+Legacy imports like ``from app.schemas import …`` are still supported via a thin
+re-export shim in ``app/schemas/__init__.py``.
+"""
+
+from datetime import datetime
+from enum import Enum
+from importlib import import_module
+from typing import Any, Dict, List, Optional
+
+from pydantic import BaseModel, Field
+
+# ---------------------------------------------------------------------------
+# Enums – shareable across request / DB models
+# ---------------------------------------------------------------------------
+
+class PlanTier(str, Enum):
+    trial = "trial"
+    essentials = "essentials"
+    pro = "pro"
+    enterprise = "enterprise"
+
+# ---------------------------------------------------------------------------
+# API  Pydantic models (previously in app.schemas)
+# ---------------------------------------------------------------------------
+
+class BaseResponse(BaseModel):
+    class Config:
+        orm_mode = True
+        json_schema_extra = {"example": {"message": "OK"}}
+
+class MessageResponse(BaseResponse):
+    message: str = Field(..., example="OK")
+
+class PolicyBundleResponse(BaseModel):
+    jws: str
+    version: int
+    etag: str
+
+class PolicyDraft(BaseModel):
+    version: int = Field(..., example=1)
+    bundle: Dict[str, Any] = Field(..., description="Raw policy document")
+
+class PolicyPublishResponse(BaseModel):
+    jws: str
+    version: int
+
+class MeResponse(BaseModel):
+    plan: str
+    trial_expires: Optional[datetime] = None
+    price: Optional[int] = None
+    quotas: Dict[str, int] = Field(default_factory=dict, description="Plan quota limits")
+    metrics_enabled: bool
+    poll_seconds: int
+
+class EventsBatch(BaseModel):
+    events: List[Dict[str, Any]]
+
+class APIKeyDB(BaseModel):
+    token_id: str
+    account_id: str
+    scopes: List[str]
+    expires_at: Optional[datetime]
+    revoked_at: Optional[datetime]
+
+class TokenCreateRequest(BaseModel):
+    name: Optional[str] = Field(None, description="Friendly label for the token")
+    scopes: Optional[List[str]] = Field(default_factory=lambda: ["read"], description="Token scopes")
+    expires_at: Optional[datetime] = Field(None, description="Expiry timestamp (UTC)")
+
+class TokenCreateResponse(BaseModel):
+    token_id: str
+    token: str  # plaintext token (returned only once)
+    scopes: List[str]
+    expires_at: Optional[datetime]
+
+class APITokenResponse(BaseModel):
+    token_id: str
+    scopes: List[str]
+    expires_at: Optional[datetime]
+    revoked_at: Optional[datetime]
+
+class TokenRevokeRequest(BaseModel):
+    token_id: str = Field(..., description="Token ID to revoke")
+
+class SignupRequest(BaseModel):
+    name: str
+    plan: PlanTier = Field(default=PlanTier.trial, description="Initial plan tier")
+
+class SignupResponse(BaseModel):
+    account_id: str
+    admin_token: str
+
+# Event model ---------------------------------------------------------------
+from app.models.events import EventIngest  # noqa: E402
+
+# Basic User model used by security_utils
+class User(BaseModel):  # noqa: D101 – simple data carrier
+    id: str
+    email: Optional[str] = None
+    full_name: Optional[str] = None
+
+class PublicKeyAddRequest(BaseModel):
+    key_id: Optional[str] = Field(None, description="Unique identifier for the key")
+    public_key: str = Field(..., description="Base64-encoded Ed25519 public key")
+
+class PublicKeyResponse(BaseModel):
+    key_id: str
+    algo: str = Field(default="ed25519")
+    created_at: datetime
+    revoked_at: Optional[datetime]
+
+class AccountCreateResponse(BaseModel):
+    """Returned by the (now optional) account-bootstrap endpoint."""
+
+    account_id: str
+
+class TokenScopeError(BaseModel):
+    """403 response for insufficient token scope."""
+
+    error: str = Field("insufficient_scope", pattern="^insufficient_scope$")
+
+# ---------------------------------------------------------------------------
+# Re-export DB row models
+# ---------------------------------------------------------------------------
+
+_db = import_module("app.models.db")
+
+# Merge symbols into current module globals so consumers can ``import app.models as m``
+_globals_update = {k: getattr(_db, k) for k in getattr(_db, "__all__", [])}
+_globals_update.update(globals())
+globals().update(_globals_update)
+
+# Build __all__
+__all__: list[str] = list(_globals_update.keys()) 

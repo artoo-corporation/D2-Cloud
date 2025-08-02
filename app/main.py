@@ -120,18 +120,26 @@ def create_app() -> FastAPI:  # noqa: C901
         max_age=600,
     )
     # Re-use existing JWKS router (/.well-known/jwks.json)
-    from app.routers.jwks_routes import router as public_jwks_router, rotate_router
-    public_app.include_router(public_jwks_router)
+    from app.routers.jwks_routes import public_router as jwks_public_router, admin_router as jwks_admin_router
+    public_app.include_router(jwks_public_router)
 
     # Mount at /public (eg. /public/.well-known/jwks.json)
     app.mount("/public", public_app)
 
+    # Expose OpenAPI YAML at /public/openapi.yaml
+    from app.openapi import install_openapi_route  # noqa: WPS433 (runtime import)
+
+    install_openapi_route(public_app)
+
     # Register private routers – explicit order matters for overrides
-    from app.routers import auth_routes, policy_routes, events_routes
-    app.include_router(auth_routes.router)
+    from app.routers import policy_routes, events_routes, keys_routes, accounts_routes, tokens_routes
     app.include_router(policy_routes.router)
-    app.include_router(rotate_router)
+    app.include_router(keys_routes.router)
+    app.include_router(jwks_admin_router)
     app.include_router(events_routes.router)
+    # Resource-oriented routers
+    app.include_router(accounts_routes.router)
+    app.include_router(tokens_routes.router)
 
     return app
 

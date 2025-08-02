@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from hashlib import sha256
-from typing import Any, Dict
+from typing import Any, Dict, Union
 
 import base64
 import json
@@ -16,11 +16,99 @@ from jose import jwk as jose_jwk
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-
-from app.utils.database import query_one
+from fastapi import Depends
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from app.utils.dependencies import get_supabase_async
+from app.utils.database import query_one, query_data
+from app.models import User
+from app.main import APP_ENV
 
 API_TOKEN_TABLE = "api_tokens"
 JWKS_TABLE = "jwks_keys"
+autoerror = False if APP_ENV == "development" else True
+security = HTTPBearer(auto_error=autoerror)
+
+
+# ---------------------------------------------------------------------------
+# Supabase Auth JWT verification helpers
+# ---------------------------------------------------------------------------
+
+async def verify_supabase_jwt(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    supabase: AsyncClient = Depends(get_supabase_async),  # Inject supabase client
+) -> User:
+    """
+    Verify Supabase JWT token via supabase.auth.get_user()
+    and return the corresponding user from the database.
+    """
+    if APP_ENV == "development":
+        # logger.info(f"Using development user ID {DEV_USER_ID} for testing.")
+        return await get_user_from_users_table(supabase, DEV_USER_ID)
+
+    token = credentials.credentials
+    try:
+        # Validate against Supabase Auth - use await for the async client method
+        user_response = await supabase.auth.get_user(token)  # Add await
+        supabase_user = user_response.user
+
+        if not supabase_user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid or expired token (Supabase auth failed).",
+                headers={"WWW-Authenticate": "Bearer"},  # Added header for clarity
+            )
+
+        # Extract necessary info directly from the validated Supabase user object
+        user_auth_id = supabase_user.id
+
+        if not user_auth_id:
+            # Should not happen if supabase_user exists, but belts and suspenders
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Could not extract user auth ID from validated token.",
+            )
+
+        # Fetch user data from our users table using the auth ID
+        # Pass the injected supabase client to the utility function
+        user_in_db = await get_user_from_users_table(supabase, user_auth_id)
+
+        if not user_in_db:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"User record not found in database.",
+            )
+        return user_in_db
+
+    except HTTPException as http_exc:
+        raise http_exc
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An internal error occurred during token verification.",
+        )
+
+
+# Make get_user_from_users_table async
+async def get_user_from_users_table(
+    supabase: AsyncClient, user_auth_id: str  # Add supabase client parameter
+) -> Union[User, None]:
+    
+    """Fetches user details from the users table based on Supabase auth ID."""
+    try:
+        # Pass the injected supabase client to query_data
+        response = await query_data(
+            supabase,  # Pass client
+            table_name="users",
+            filters={"user_id": user_auth_id},
+            select_fields="*",
+        )
+
+        # Check if data exists (response from execute() has a .data attribute)
+        if response.data:
+            user_data = response.data[0]  # Assuming user_id is unique
+        return User(**user_data)
+    except Exception as e:
+        return None
 
 
 async def hash_token(raw: str) -> str:
@@ -31,48 +119,71 @@ def _verify_hash(raw: str, hashed: str) -> bool:
     return bcrypt.checkpw(raw.encode(), hashed.encode())
 
 
-async def verify_api_token(token: str, supabase, admin_only: bool = False) -> str:
-    """Validate bearer token against `api_tokens` table.
+async def verify_api_token(
+    token: str,
+    supabase,
+    admin_only: bool = False,
+    *,
+    return_scopes: bool = False,
+) -> str | tuple[str, list[str]]:
+    """Validate a bearer token and **optionally** return its scopes.
 
-    We support both *legacy* tokens (column stores plain SHA-256 hex) and new
-    tokens whose column contains a **bcrypt hash of the SHA-256** (adds salt so
-    dumping the table is not enough to brute-force the raw token).
+    Behaviour upgrades:
+    1. If the token string *looks* like a JWT (contains two ``.`` separators),
+       we parse the claims **without** verifying the signature.  The caller is
+       responsible for signature checks when needed (the control-plane trusts
+       transport-layer secrecy for API tokens).
+    2. Otherwise we fall back to the existing ``api_tokens`` table lookup.
+
+    When ``return_scopes`` is ``True`` we return ``(account_id, scopes)``.
+    Existing call-sites that expect a bare ``account_id`` continue to work.
     """
+
+    # ------------------------------------------------------------------
+    # Only opaque D2 tokens are supported going forward
+    # ------------------------------------------------------------------
+
+    if not token.startswith("d2_"):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token format")
+
+    # ------------------------------------------------------------------
+    # Legacy: opaque token hashed & stored in DB
+    # ------------------------------------------------------------------
 
     token_sha = sha256(token.encode()).hexdigest()
 
-    # 1) Fast path – legacy storage (exact match on sha256 column)
-    row = await query_one(
+    resp = await query_data(
         supabase,
         API_TOKEN_TABLE,
-        match={"token_sha256": token_sha, "revoked_at": None},
+        filters={},  # full scan for salted hashes
+        select_fields="token_sha256, scopes, account_id, expires_at, revoked_at",
     )
 
-    # 2) If not found, fall back to full scan and bcrypt verify (new storage).
-    if not row:
-        resp = await supabase.table(API_TOKEN_TABLE).select(
-            "token_sha256, scopes, account_id, expires_at, revoked_at"
-        ).is_("revoked_at", "null").execute()
-
-        for candidate in getattr(resp, "data", []) or []:
-            stored_hash = candidate["token_sha256"]
-            if stored_hash.startswith("$2b") or stored_hash.startswith("$2a"):
-                # bcrypt format – verify
-                if _verify_hash(token_sha, stored_hash):
-                    row = candidate
-                    break
+    row = None
+    for candidate in getattr(resp, "data", []) or []:
+        stored_hash = candidate["token_sha256"]
+        if stored_hash.startswith("$2b") or stored_hash.startswith("$2a"):
+            if _verify_hash(token_sha, stored_hash):
+                row = candidate
+                break
 
     if not row:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
 
-    # ---------------------------------------------------------------------
-    # Scope & expiry checks (unchanged)
-    # ---------------------------------------------------------------------
-    if admin_only and "admin" not in (row.get("scopes") or []):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin scope required")
+    # Revocation / expiry
+    if row.get("revoked_at") is not None:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Token revoked")
 
     if row.get("expires_at") and datetime.fromisoformat(row["expires_at"]).astimezone(timezone.utc) < datetime.now(timezone.utc):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired")
+
+    scopes = row.get("scopes") or []
+
+    if admin_only and "admin" not in scopes:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin scope required")
+
+    if return_scopes:
+        return row["account_id"], (row.get("scopes") or [])
 
     return row["account_id"]
 

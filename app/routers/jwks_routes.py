@@ -9,18 +9,20 @@ from fastapi import APIRouter, Depends, Header, Query, status, Response, Request
 # Rate limiter exported by main.py
 from app.main import limiter
 
-from app.schemas import MessageResponse
-from app.utils.security_utils import generate_rsa_jwk, verify_api_token, encrypt_private_jwk
+from app.models import MessageResponse
+from app.utils.security_utils import generate_rsa_jwk, encrypt_private_jwk
 from app.utils.database import insert_data, query_many
 from app.utils.dependencies import get_supabase_async
+from app.utils.dependencies import require_account_admin
 
-router = APIRouter(prefix="/.well-known", tags=["jwks"])
+# Public discovery endpoints (no auth)
+public_router = APIRouter(prefix="/.well-known", tags=["jwks-public"])
 
-# Secondary router for admin actions
-rotate_router = APIRouter(prefix="/v1/jwks", tags=["jwks"])
+# Admin-only management endpoints
+admin_router = APIRouter(prefix="/v1/jwks", tags=["jwks-admin"])
 
 
-@router.get("/jwks.json", response_model=Dict[str, Any])
+@public_router.get("/jwks.json", response_model=Dict[str, Any])
 @limiter.limit("60/minute")
 async def get_jwks(
     request: Request,
@@ -46,14 +48,11 @@ async def get_jwks(
 # ---------------------------------------------------------------------------
 
 
-@rotate_router.post("/rotate", response_model=MessageResponse, status_code=status.HTTP_201_CREATED)
+@admin_router.post("/rotate", response_model=MessageResponse, status_code=status.HTTP_201_CREATED)
 async def rotate_jwk(
-    authorization: str = Header(...),
+    account_id: str = Depends(require_account_admin),
     supabase=Depends(get_supabase_async),
 ):
-    admin_token = authorization.split(" ")[-1]
-    account_id = await verify_api_token(admin_token, supabase, admin_only=True)
-
     jwk_pair = generate_rsa_jwk()
     kid = str(uuid.uuid4())
 
@@ -73,4 +72,4 @@ async def rotate_jwk(
 
 
 # Re-export for main.py
-__all__ = ["router", "rotate_router"] 
+__all__ = ["public_router", "admin_router"] 

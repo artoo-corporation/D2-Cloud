@@ -7,7 +7,7 @@ from pydantic.dataclasses import dataclass
 
 
 @dataclass
-class EventIngest:  # noqa: D101  (simple data container)
+class EventIngest:  # noqa: D101
     """Single usage event payload for the ingest endpoint."""
 
     event_type: str

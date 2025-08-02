@@ -1,0 +1,7 @@
+# generated: 2025-07-30
+# Placeholder – run CI job `export-openapi` to refresh.
+openapi: 3.1.0
+info:
+  title: D2 Cloud Control-Plane API
+  version: 0.0.0
+paths: {} 

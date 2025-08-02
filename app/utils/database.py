@@ -53,7 +53,7 @@ async def query_data(
     :param table_name: Name of the table to query.
     :param filters: Dictionary where keys are column names and values are filter conditions.
                      Use a tuple (operator, value) for non-equality filters.
-                     Supported operators: 'eq', 'in', 'gt', 'lt', 'gte', 'lte', 'like', 'ilike', 'neq'.
+                     Supported operators: 'eq', 'in', 'gt', 'lt', 'gte', 'lte', 'like', 'ilike', 'neq', 'is'.  (# 'is': null/not null)
     :param order_by: Tuple (column_name, desc) where desc=True means descending order.
     :param select_fields: Fields to select (default is "*").
     :param limit: Optional integer to limit the number of results.
@@ -69,6 +69,8 @@ async def query_data(
                 operator, value = condition
                 if operator == "in":
                     query = query.in_(key, value)
+                elif operator == "is":
+                    query = query.is_(key, value)
                 elif operator == "gt":
                     query = query.gt(key, value)
                 elif operator == "lt":
@@ -146,6 +148,8 @@ async def update_data(
                         query = query.ilike(key, value)
                     elif operator == "neq":
                         query = query.neq(key, value)
+                    elif operator == "is":
+                        query = query.is_(key, value)
                 else:  # Default to equality check
                     query = query.eq(key, condition)
 
