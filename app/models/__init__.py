@@ -74,7 +74,6 @@ class APIKeyDB(BaseModel):
 class TokenCreateRequest(BaseModel):
     name: Optional[str] = Field(None, description="Friendly label for the token")
     scopes: Optional[List[str]] = Field(default_factory=lambda: ["read"], description="Token scopes")
-    expires_at: Optional[datetime] = Field(None, description="Expiry timestamp (UTC)")
 
 class TokenCreateResponse(BaseModel):
     token_id: str

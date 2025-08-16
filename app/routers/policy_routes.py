@@ -19,12 +19,14 @@ from app.models import (
 )
 from app.utils.database import insert_data, query_one, update_data
 from app.utils.dependencies import get_supabase_async, require_account_admin
-from app.utils.security_utils import get_active_private_jwk
+from app.utils.security_utils import get_active_private_jwk, verify_api_token
 from app.utils.plans import enforce_bundle_poll
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 import base64
+from app.utils.require_scope import require_scope
 
 # Helper to detect "deny" statements in bundle
+
 
 def _count_denies(obj: dict | list) -> int:  # noqa: WPS231
     if isinstance(obj, list):
@@ -43,13 +45,10 @@ POLICY_TABLE = "policies"
 @router.get("/bundle", response_model=PolicyBundleResponse)
 async def get_policy_bundle(
     response: Response,
-    authorization: str = Header(..., description="Bearer API token"),
+    account_id: str = Depends(require_scope("read")),
     if_none_match: str | None = Header(None, alias="If-None-Match"),
     supabase=Depends(get_supabase_async),
 ):
-    token = authorization.split(" ")[-1]
-    account_id = await verify_api_token(token, supabase)
-
     row = await query_one(
         supabase,
         POLICY_TABLE,
@@ -100,6 +99,7 @@ async def get_policy_bundle(
 async def upload_policy_draft(
     draft: PolicyDraft,
     account_id: str = Depends(require_account_admin),
+    authorization: str = Header(..., description="Bearer API token"),
     supabase=Depends(get_supabase_async),
 ):
     await insert_data(
@@ -112,6 +112,21 @@ async def upload_policy_draft(
             "is_draft": True,
         },
     )
+    # Audit attribution for draft
+    try:
+        details = await verify_api_token(authorization.split(" ")[-1], supabase, admin_only=False, return_details=True)  # type: ignore[assignment]
+        await insert_data(
+            supabase,
+            "audit_logs",
+            {
+                "actor_id": account_id,
+                "token_id": details.get("token_id"),
+                "action": "policy_draft",
+                "version": draft.version,
+            },
+        )
+    except Exception:
+        pass
     return MessageResponse(message="Draft uploaded")
 
 
@@ -123,7 +138,8 @@ async def publish_policy(
     if_none_match: str | None = Header(None, alias="If-None-Match"),
     if_match: str | None = Header(None, alias="If-Match"),
     force: bool = Query(False),
-    account_id: str = Depends(require_account_admin),
+    account_id: str = Depends(require_scope("policy.publish")),
+    authorization: str = Header(..., description="Bearer API token"),
     supabase=Depends(get_supabase_async),
 ):
     # ------------------------------------------------------------------
@@ -260,6 +276,23 @@ async def publish_policy(
         "ETag": f'"{etag}"',
         "X-D2-Poll-Seconds": str(poll_seconds),
     }
+
+    # Audit attribution for publish
+    try:
+        details = await verify_api_token(authorization.split(" ")[-1], supabase, admin_only=False, return_details=True)  # type: ignore[assignment]
+        await insert_data(
+            supabase,
+            "audit_logs",
+            {
+                "actor_id": account_id,
+                "token_id": details.get("token_id"),
+                "action": "policy_publish",
+                "key_id": x_d2_key_id,
+                "version": new_version,
+            },
+        )
+    except Exception:
+        pass
 
     return JSONResponse(content=response.model_dump(), headers=headers)
 

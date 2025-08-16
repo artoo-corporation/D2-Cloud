@@ -143,6 +143,6 @@ def create_app() -> FastAPI:  # noqa: C901
 
     return app
 
-
 # The object Vercel imports
 app = create_app()
+

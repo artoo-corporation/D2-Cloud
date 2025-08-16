@@ -48,6 +48,18 @@ def _event():
 def test_ingest_rate_limited(api_client, patch_verify, monkeypatch):
     token = make_token(ACCOUNT, ["read"])
 
+    # Ensure account lookup returns a minimal row (patch the imported symbol on the router)
+    import app.routers.events_routes as routes
+
+    async def _query_one_stub(_sp, table_name, match=None, order_by=None, **kw):  # noqa: ANN001
+        if table_name == "accounts":
+            return {"id": ACCOUNT, "plan": "trial"}
+        return None
+
+    monkeypatch.setattr(routes, "query_one", _query_one_stub, raising=True)
+    from app.utils import database as db
+    monkeypatch.setattr(db, "query_one", _query_one_stub, raising=True)
+
     # First call populates timestamp dict via plan enforcement
     api_client.post(PATH, json=_event(), headers={"Authorization": f"Bearer {token}"})
 

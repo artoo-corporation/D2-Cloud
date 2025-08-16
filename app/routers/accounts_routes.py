@@ -27,12 +27,12 @@ from fastapi import Header, HTTPException
 from app.models import MeResponse
 from app.utils.plans import effective_plan, get_plan_limit, PRICES
 from app.utils.database import query_one
-from app.utils.dependencies import require_token
+from app.utils.require_scope import require_scope
 
 
 @router.get("/me", response_model=MeResponse)
 async def get_me(
-    account_id: str = Depends(require_token),
+    account_id: str = Depends(require_scope("read")),
     supabase=Depends(get_supabase_async),
 ):
     """Return plan, quotas and misc account metadata for the caller."""
@@ -60,6 +60,7 @@ async def get_me(
         ),
         "event_batch": _env_int(f"{plan_prefix}_EVENT_BATCH", 1000),
         "max_tools": get_plan_limit(plan, "max_tools"),
+        "event_payload_max_bytes": _env_int(f"{plan_prefix}_EVENT_MAX_BYTES", 32 * 1024),
     }
 
     return MeResponse(

@@ -2,10 +2,11 @@ from __future__ import annotations
 
 """API token management endpoints nested under /v1/accounts/{account_id}.
 
-If an account has **no** tokens yet, the *create* endpoint allows anonymous
-access and forcibly issues an ``["admin"]`` token.  Once at least one token
-exists, all further operations require an existing admin token in the
-Authorization header.
+Creation of tokens is restricted to authenticated dashboard users (Supabase
+session). All other token operations still require an admin token.
+
+First-token behavior: The very first token for an account is forced to
+["read"]. All subsequent tokens default to ["admin"] unless narrowed.
 """
 
 import secrets
@@ -21,9 +22,9 @@ from app.models import (
     TokenCreateRequest,
     TokenCreateResponse,
 )
-from app.utils.dependencies import get_supabase_async, require_token_admin
+from app.utils.dependencies import get_supabase_async, require_token_admin, require_actor_admin, Actor
 from app.utils.database import insert_data, query_data, update_data
-from app.utils.security_utils import hash_token
+from app.utils.security_utils import hash_token, compute_token_lookup
 
 API_TOKEN_TABLE = "api_tokens"
 TOKEN_PREFIX = "d2_"
@@ -42,7 +43,7 @@ async def _token_count(supabase, account_id: str) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Create token (admin-only *after* bootstrap)
+# Create token (Supabase session required)
 # ---------------------------------------------------------------------------
 
 
@@ -54,33 +55,39 @@ async def _token_count(supabase, account_id: str) -> int:
 async def create_token(
     account_id: str = Path(..., description="Target account ID"),
     payload: TokenCreateRequest | None = None,
-    admin_account: str | None = Depends(require_token_admin),  # None during bootstrap
+    actor: Actor = Depends(require_actor_admin),  # Must be Supabase session (user_id present)
     supabase=Depends(get_supabase_async),
 ):
     """Issue a new API token.
 
     Behaviour:
-    • If the account currently has **zero** tokens we allow unauthenticated
-      creation and force ``scopes=["admin"]``.
-    • Otherwise the caller must present an existing *admin* token.
+    • Caller must be an authenticated Supabase user for the same account.
+    • If this is the first token for the account, scopes are forced to ["read"].
+    • Otherwise, scopes default to ["admin"] unless explicitly narrowed by payload.
     """
+
+    # Enforce Supabase session and account match
+    if actor.user_id is None:
+        raise HTTPException(status_code=403, detail="supabase_session_required")
+    if actor.account_id != account_id:
+        raise HTTPException(status_code=403, detail="account_mismatch")
 
     existing = await _token_count(supabase, account_id)
 
-    if existing:
-        # must have passed require_token_admin so admin_account equals account_id
-        if admin_account != account_id:
-            raise HTTPException(status_code=403, detail="account_mismatch")
-        scopes = ["admin"]  # enforce admin scope regardless of payload
-    else:
-        # Bootstrap path – first token is READ ONLY
+    if existing == 0:
         scopes = ["read"]
+    else:
+        scopes = ["admin"]
+        if payload and payload.scopes:
+            requested = set(payload.scopes)
+            scopes = ["admin"] if "admin" in requested else list(requested or {"read"})
 
     # Generate token & identifiers
     raw_token = f"{TOKEN_PREFIX}{secrets.token_urlsafe(32)}"
     token_id = str(uuid4())
     token_sha = sha256(raw_token.encode()).hexdigest()
     token_sha_hashed = await hash_token(token_sha)
+    token_lookup = compute_token_lookup(raw_token)
 
     await insert_data(
         supabase,
@@ -88,9 +95,11 @@ async def create_token(
         {
             "token_id": token_id,
             "token_sha256": token_sha_hashed,
+            **({"token_lookup": token_lookup} if token_lookup is not None else {}),
             "account_id": account_id,
             "scopes": scopes,
-            "expires_at": payload.expires_at if payload else None,
+            "expires_at": None,
+            "created_by_user_id": actor.user_id,
         },
     )
 
@@ -98,7 +107,7 @@ async def create_token(
         token_id=token_id,
         token=raw_token,
         scopes=scopes,
-        expires_at=payload.expires_at if payload else None,
+        expires_at=None,
     )
 
 

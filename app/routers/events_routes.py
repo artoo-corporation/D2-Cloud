@@ -9,7 +9,8 @@ from fastapi import APIRouter, Depends, Header, HTTPException, status, Request
 
 from app.models import MessageResponse
 from app.models.events import EventIngest
-from app.utils.dependencies import get_supabase_async, require_token
+from app.utils.dependencies import get_supabase_async
+from app.utils.require_scope import require_scope
 from app.utils.plans import enforce_event_limits, effective_plan
 from app.utils.database import query_one
 from datetime import datetime, timezone
@@ -24,7 +25,7 @@ LOGFLARE_API_KEY = os.getenv("LOGFLARE_API_KEY")
 async def ingest_events(
     request: Request,
     event: EventIngest,
-    account_id: str = Depends(require_token),
+    account_id: str = Depends(require_scope("read")),
     supabase=Depends(get_supabase_async),
 ):
     # account_id is provided by dependency

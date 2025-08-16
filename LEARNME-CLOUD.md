@@ -28,18 +28,22 @@ SDK ↔ HTTPS ─────────────┐
 
 | Variable | Purpose | Default |
 |----------|---------|---------|
-| `SUPABASE_URL`, `SUPABASE_KEY` | Connection creds (pinned during cold-start). | – |
+| `SUPABASE_URL`, `SUPABASE_KEY` | Connection creds (used by async Supabase client). | – |
 | `FRONTEND_ORIGIN` | Allowed CORS origin for the *private* API. | – |
 | `LOGFLARE_HTTP_ENDPOINT` / `LOGFLARE_API_KEY` | Ingest endpoint + key. | `https://api.logflare.app` / *unset* |
 | `JWK_AES_KEY` | 32-byte base64url key for AES-GCM encryption of private keys at rest. | none (plain-text in dev) |
 | `CLICKHOUSE_HTTP_ENDPOINT` / `CLICKHOUSE_USER` / `CLICKHOUSE_PASSWORD` | Destination & credentials for bulk event export (ClickHouse). | – |
-| `PRO_POLL_SEC` | Maximum SDK poll interval (seconds) for PRO plan. | 60 |
-| `PRO_EVENT_BATCH` | Maximum events per `/v1/events/ingest` call for PRO plan. | 1000 |
-| `ENTERPRISE_POLL_SEC` | Poll interval override for Enterprise plan. | 30 |
-| `ENTERPRISE_EVENT_BATCH` | Events per ingest request for Enterprise plan. | 5000 |
-| `JWK_OVERLAP_DAYS` | Days two key-pairs overlap before pruning. | `7` |
+| `PRO_POLL_SEC` | Optional override for PRO polling cadence. | 60 (seconds) |
+| `PRO_EVENT_BATCH` | Optional SDK-side batching hint. | 1000 (events) |
+| `PRO_EVENT_MAX_BYTES` | Optional per-plan event payload limit exposed via `/v1/accounts/me`. | 32768 (bytes) |
+| `ENTERPRISE_POLL_SEC` | Optional override for Enterprise polling cadence. | 30 (seconds) |
+| `ENTERPRISE_EVENT_BATCH` | Optional SDK-side batching hint. | 5000 (events) |
+| `ENTERPRISE_EVENT_MAX_BYTES` | Optional per-plan event payload limit. | 32768 (bytes) |
+| `JWK_OVERLAP_DAYS` | Days two key-pairs overlap before pruning. | `7` (days) |
 
 > All cron scripts inherit the same env, so secrets live only in Vercel.
+
+> Per-plan overrides: the API surfaces plan-specific quotas from these env vars (e.g. `PRO_*`, `ENTERPRISE_*`) in `/v1/accounts/me`. If unset, baked-in defaults from `plans.py` are used.
 
 ---
 ## 3. Supabase Schema
@@ -60,18 +64,17 @@ SDK ↔ HTTPS ─────────────┐
 
 | Method & Path | Description | Headers |
 |---------------|-------------|---------|
-| **GET** `/public/.well-known/jwks.json` | Returns JSON Web Key Set containing *all* public keys, or filtered by `?account_id=`. | `Cache-Control: public,max-age=300,immutable`  
+| **GET** `https://d2.artoo.love/.well-known/jwks.json` | Returns JSON Web Key Set containing *all* public keys, or filtered by `?account_id=`. | `Cache-Control: public,max-age=300,immutable`  
 `Rate-Limit: 60/min` enforced via SlowAPI |
 
-### 4.2 Authentication & Account – `app/routers/auth_routes.py`
+### 4.2 Accounts & Tokens – `accounts_routes.py` / `tokens_routes.py`
 
 | Method & Path | Scope | Payload | Response |
 |---------------|-------|---------|----------|
-| **GET** `/v1/me` | bearer token | – | `{ plan, quotas, metrics_enabled, poll_seconds }` (dynamic quotas resolved from env + account row). |
-| **POST** `/v1/signup` | *public* | `{ name, plan }` | Returns `{ account_id, admin_token }` once. |
-| **POST** `/v1/token` | *admin* | `{ name?, scopes?, expires_at? }` | Returns **plaintext** token *once* plus `token_id`. |
-| **DELETE** `/v1/token/{token_id}` | *admin* | – | 202 + message – soft-deletes by setting `revoked_at`. |
-| **GET** `/v1/tokens` | *admin* | – | Array of existing tokens (no plaintext). |
+| **GET** `https://d2.artoo.love/v1/accounts/me` | bearer token | – | `{ plan, quotas, metrics_enabled, poll_seconds }` |
+| **POST** `https://d2.artoo.love/v1/accounts/{account_id}/tokens` | Supabase session (dashboard) | `{ name?, scopes?, expires_at? }` | Returns **plaintext** token once plus `token_id`. Tokens are created by authenticated dashboard users; server stores `created_by_user_id`. |
+| **GET** `https://d2.artoo.love/v1/accounts/{account_id}/tokens` | *admin* | – | Array of existing tokens (no plaintext). |
+| **DELETE** `https://d2.artoo.love/v1/accounts/{account_id}/tokens/{token_id}` | *admin* | – | 202 + message – soft-deletes by setting `revoked_at`. |
 
 **Auth flow**: `Authorization: Bearer <token>` header → `verify_api_token()`
 1. Compute SHA-256 of token.
@@ -83,22 +86,24 @@ SDK ↔ HTTPS ─────────────┐
 
 | Method & Path | Scope | Notes |
 |---------------|-------|-------|
-| **GET** `/v1/policy/bundle` | bearer | • Validates revocation + plan quota (bundle size)  
+| **GET** `https://d2.artoo.love/v1/policy/bundle` | bearer | • Validates revocation + plan quota (bundle size)  
 • Server-side poll window via per-account bucket  
 • Returns `{ jws, version, etag }` and headers  
  `ETag: <sha256>`  `X-D2-Poll-Seconds: <int>`  
 • Honors `If-None-Match` → **304** when unchanged. |
-| **PUT** `/v1/policy/draft` | *admin* | Upload unsigned draft `{ version, bundle }` (JSON). |
-| **POST** `/v1/policy/publish` | *admin* | ① **Required headers**: `If-Match`/`If-None-Match`, `X-D2-Signature`, `X-D2-Key-Id` ② Verifies signature (Ed25519) ③ Rejects stale ETag → **409 etag_mismatch** ④ Increments `version` (optimistic-lock) – rejects rollback → **409 version_rollback** ⑤ Safety guard: if bundle removes all `"effect":"deny"` rules → **400 no_deny_rules** unless query `force=true` (writes `audit_logs.force_publish`). Returns JWS plus `ETag`, `X-D2-Poll-Seconds`. |
-| **POST** `/v1/policy/revoke` | *admin* | Sets `revocation_time` (enforced within ≤ 60 s via cron). |
+| **PUT** `https://d2.artoo.love/v1/policy/draft` | account-admin | Upload unsigned draft `{ version, bundle }` (JSON). |
+| **POST** `https://d2.artoo.love/v1/policy/publish` | account-admin | ① **Required headers**: `If-Match`/`If-None-Match`, `X-D2-Signature`, `X-D2-Key-Id` ② Verifies signature (Ed25519) ③ Rejects stale ETag → **409 etag_mismatch** ④ Increments `version` (optimistic-lock) – rejects rollback → **409 version_rollback** ⑤ Safety guard: if bundle removes all `"effect":"deny"` rules → **400 no_deny_rules** unless query `force=true` (writes `audit_logs.force_publish`). Returns JWS plus `ETag`, `X-D2-Poll-Seconds`. |
+| **POST** `https://d2.artoo.love/v1/policy/revoke` | account-admin | Sets `revocation_time` (enforced within ≤ 60 s via cron). |
+
+> Policy operations are **admin-only** (no `policy.*` scopes). Keys upload is gated by `key.upload`.
 
 ### 4.4 Events & Metrics – `app/routers/events_routes.py`
 
 | Method & Path | Notes |
 |---------------|-------|
-| **POST** `/v1/events/ingest` | • Rejects `Content-Length` > 256 KiB (MVP guard)  
-• Auth + plan lookup → `enforce_event_limits()`  
-• Streams batch to Logflare (async) and returns **202**. |
+| **POST** `https://d2.artoo.love/v1/events/ingest` | • Rejects payloads > 32 KiB  
+• Auth + plan lookup → `enforce_event_limits()` (rate-limit per plan)  
+• Always persists to `events`; optionally forwards to Logflare if `LOGFLARE_API_KEY` is set; returns **202**. |
 
 ### 4.5 Keys & JWKS Admin
 
@@ -106,9 +111,9 @@ SDK ↔ HTTPS ─────────────┐
 
 | Method & Path | Scope | Description |
 |---------------|-------|-------------|
-| **POST** `/v1/keys` | *admin* | Adds an Ed25519 public key. Body `{ key_id?, public_key (base64) }`. |
-| **DELETE** `/v1/keys/{key_id}` | *admin* | Soft-revokes the key (`revoked_at`). |
-| **GET** `/v1/keys?include_revoked=1` | *admin* | Lists keys (optionally revoked). |
+| **POST** `https://d2.artoo.love/v1/keys` | `key.upload` | Adds an Ed25519 public key. Body `{ key_id?, public_key (base64) }`. |
+| **DELETE** `https://d2.artoo.love/v1/keys/{key_id}` | *admin* | Soft-revokes the key (`revoked_at`). |
+| **GET** `https://d2.artoo.love/v1/keys?include_revoked=1` | *admin* | Lists keys (optionally revoked). |
 
 > **ETag & Optimistic Concurrency**  – The control-plane uses strong quoted SHA-256 ETags on every published bundle. Clients **must** send `If-Match` (preferred) or `If-None-Match` with the previously observed ETag when publishing. This prevents two deploys from overwriting each other.
 
@@ -125,7 +130,7 @@ sequenceDiagram
 
 | Path | Scope | Behaviour |
 |------|-------|-----------|
-| **POST** `/v1/jwks/rotate` | *admin* | Generates 2048-bit RSA key-pair, encrypts private JWK, inserts row (kid = UUID).
+| **POST** `https://d2.artoo.love/v1/jwks/rotate` | *admin* | Generates 2048-bit RSA key-pair, encrypts private JWK, inserts row (kid = UUID).
 
 ---
 ## 5. Middleware & Limits
@@ -161,11 +166,10 @@ Bundle size, ingest interval and total event volume are safety limits, not price
 
 | Script | Schedule | Action |
 |--------|----------|--------|
-| `app.cron.revoke_enforcer` | `*/1 * * * *` | Marks policies `is_revoked` when `revocation_time < now()`. |
-| `app.cron.trial_locker` | `0 2 * * *` | Converts expired trial accounts to `locked` plan. |
+| `app.cron.revoke_enforcer` | `*/1 * * * *` | Marks policies `is_revoked` when `revocation_time < now()`.
+| `app.cron.trial_locker` | `0 2 * * *` | Converts expired trial accounts to `locked` plan.
 | `app.cron.key_rotation_sweeper` | `0 3 * * *` | Deletes private JWKs older than overlap window (`JWK_OVERLAP_DAYS`). |
 | `app.cron.event_rollup` | `0 * * * *` | Ships newly-ingested events from Supabase → ClickHouse (`events_raw` table). |
-| *(future)* `clean_usage_counters` | `10 0 * * *` | Trim `usage_counters` > 25 h old. |
 
 All cron modules are runnable locally via `python -m app.cron.<name>`.
 
@@ -191,7 +195,7 @@ All cron modules are runnable locally via `python -m app.cron.<name>`.
 * ~~Import path drift – fixed (`policy_routes` now imports from `app.utils.plans`).~~
 * ~~`api/` legacy folder – removed redundant cron scripts.~~
 * ~~`app/utils/enums.py` – file deleted (replaced by `PlanTier` enum in `app.models`).~~
-* **OpenAPI coverage** – `Signup` and `Keys` endpoints present but not yet reflected in generated OpenAPI YAML.
+* **OpenAPI coverage** – Keys endpoints present but not yet reflected in generated OpenAPI YAML.
 * **Unit test gaps** – Missing coverage for cron jobs and `plans.py` helpers.
 * **Doc updates** – Any future quota changes must update `plans.py` *and* this guide.
 
@@ -201,7 +205,7 @@ _Supabase-Auth + opaque D2 tokens, unified models, dependency-based auth_
 
 ### 10.1 Model namespace
 * All Pydantic models now live in `app.models` (import `from app.models import …`).
-* `app.schemas` package deleted; a thin shim can be restored but is not shipped.
+* The old `app/schemas` package is no longer used.
 * New enums: `PlanTier` – `trial | essentials | pro | enterprise`.
 
 ### 10.2 Authentication layers
@@ -211,7 +215,7 @@ _Supabase-Auth + opaque D2 tokens, unified models, dependency-based auth_
 | `require_token_admin`   | D2 **admin** token                           | `account_id` | token CRUD, key CRUD |
 | `require_account_admin` | EITHER Supabase **admin** session JWT **or** D2 admin token | `account_id` | policy draft / publish / revoke, JWKS rotate |
 
-Implementation lives in `app/utils/dependencies.py`.
+> Policy operations are **admin-only** (no `policy.*` scopes). Keys upload is gated by `key.upload`.
 
 ### 10.3 Token system
 * Only opaque tokens stored in `api_tokens` remain – bcrypt(SHA-256(token)).
@@ -219,15 +223,15 @@ Implementation lives in `app/utils/dependencies.py`.
   – **read** (policy bundle, metrics read)  
   – **admin** (full CRUD)  
   – **key.upload** (for Ed25519 public key upload) — enforced via `require_scope()` helper.
-* Issuer rules (`POST /v1/accounts/{id}/tokens`):
-  1. If **no** tokens exist → bootstrap issues a `read` token (unauthenticated).
-  2. Subsequent calls (must present admin token) always create an **admin** token.
+* Issuer rules (`POST /v1/accounts/{account_id}/tokens`):
+  - Must be called from the dashboard with a Supabase session (server verifies account match). Server records `created_by_user_id`.
+  - Default scope is `admin`; requests may narrow scopes but not elevate.
 
 ### 10.4 Routes & auth matrix (excerpt)
 | Path | Method | Dependency |
 |------|--------|------------|
 | `/v1/accounts/me` | GET | `require_token` |
-| `/v1/accounts/{id}/tokens` | POST/GET/DELETE | `require_token_admin` |
+| `/v1/accounts/{account_id}/tokens` | POST/GET/DELETE | `require_token_admin` |
 | `/v1/policy/draft` | PUT | `require_account_admin` |
 | `/v1/policy/publish` | POST | `require_account_admin` + `X-D2-Signature`/`X-D2-Key-Id` |
 | `/v1/policy/revoke` | POST | `require_account_admin` |
@@ -235,8 +239,14 @@ Implementation lives in `app/utils/dependencies.py`.
 | `/v1/keys` | GET/DELETE | `require_token_admin` |
 | `/.well-known/jwks.json` | GET | public (SlowAPI 60/min) |
 
+#### `/v1/accounts/me` response notes
+* quotas.poll_sec (seconds)
+* quotas.event_batch (events)
+* quotas.max_tools (count)
+* quotas.event_payload_max_bytes (bytes) – default 32768 (32 KiB); optional per-plan env override via `PRO_EVENT_MAX_BYTES`, `ENTERPRISE_EVENT_MAX_BYTES`.
+
 ### 10.5 Supabase trigger onboarding
-New users are created by Supabase Auth; a Postgres trigger inserts the matching row into `public.accounts` (`id`, `plan='trial'`, etc.). The old `/v1/accounts` bootstrap route is now optional/internal.
+New users are created by Supabase Auth; a Postgres trigger inserts the matching row into `public.accounts` (`id`, `plan='trial'`, etc.).
 
 ### 10.6 Events ingest & ClickHouse
 * `/v1/events/ingest` stores events in Supabase; if `LOGFLARE_API_KEY` is set it also streams to Logflare.
@@ -252,5 +262,23 @@ New users are created by Supabase Auth; a Postgres trigger inserts the matching 
 * `signup_routes.py` removed; provisioning handled by Supabase trigger.
 * `app/schemas/*` package deleted.
 
+### 10.9 Audit & Attribution
+* Draft and publish write to `audit_logs` with `actor_id` (account), `token_id` (if D2 token used), `user_id` (Supabase), action, and version/key_id.
+
+### 10.10 Strict scopes (metrics)
+* A strict scope dependency is available: `require_scope_strict()`.
+* Use `require_scope_strict("metrics.read")` on any future metrics observation endpoints so that holding an `admin` token alone does not grant metrics access; the token must explicitly include `metrics.read`.
+
 ---
-This section should give new contributors a concise map of the post-refactor security & routing model. Feel free to regenerate the table with `make docs` after adding new scopes or routes.
+## 11. 1.0 Release Checklist
+
+- Provision and verify env vars: `SUPABASE_URL`, `SUPABASE_KEY`, `FRONTEND_ORIGIN`, `JWK_AES_KEY` (32-byte urlsafe-base64), optional `PRO_*` / `ENTERPRISE_*` overrides, optional ClickHouse creds.
+- Enable RLS on tenant tables and confirm admin-only routes (`require_account_admin`, `require_token_admin`).
+- Create DB indexes: 
+  - `api_tokens(token_lookup)`, `api_tokens(revoked_at, expires_at)`
+  - `policies(account_id, version DESC)`, `jwks_keys(account_id, created_at DESC)`
+  - `public_keys(account_id, revoked_at)`
+- Configure Vercel cron: `event_rollup`, `key_rotation_sweeper`, `revoke_enforcer`, `trial_locker`.
+- Rotate JWKS once post-deploy to validate AES-GCM at rest and JWKS discovery.
+- Regenerate and publish `/public/openapi.yaml`; spot-check policy, keys, tokens paths and headers.
+- Run smoke tests against deployment: health (`/`), JWKS, `/v1/accounts/me` with a valid token, policy publish + ETag flow.

@@ -13,8 +13,8 @@ integrating with external services such as ClickHouse and Logflare.
 ```
 ┌───────────────┐      HTTP (ASGI)      ┌───────────────┐
 │ Vercel Edge   │  ───────────────────▶ │   FastAPI     │
-│  /  Server    │                      │  (app.main)   │
-└───────────────┘                      │               │
+│  /  Server    │                       │  (app.main)   │
+└───────────────┘                       │               │
                                         │  ├ Routers    │
                                         │  ├ Middleware │
                                         │  └ Utils      │
@@ -51,7 +51,7 @@ utils, cron jobs and schemas.
   * CORS – private origins driven by `ALLOWED_ORIGINS`, public app wildcard
   * Health-check at `/`.
 * Registers all routers in explicit order to allow override precedence:
-  `auth`, `policy`, `keys`, `jwks-admin`, `events`, `signup`.
+  `auth`, `policy`, `keys`, `jwks-admin`, `events`.
 * Exposes `/.well-known/jwks.json` via the public sub-app.
 * Exports `app` symbol which Vercel automatically detects.
 
@@ -107,58 +107,60 @@ Structured JSON logs with consistent fields (`level`, `name`, `message`,
 ### Misc
 
 * `utils.utils.py` – trivial helpers (`generate_uuid`, `get_env_bool`).
-* `utils.enums.py` – placeholder for future enum collections.
 
 ---
 
 ## 5. Routers / API Surface
 
 Below every path is prefixed by `/api` (or similar) depending on deployment –
-here we list the raw FastAPI routes exactly as implemented.
+All paths below are fully-qualified with the base URL `https://d2.artoo.love`.
 
-### 5.1 Authentication (`app/routers/auth_routes.py` – prefix `/v1`)
+### 5.1 Accounts & Authentication (`accounts_routes.py` + `tokens_routes.py`)
 
 | Method | Path | Auth | Description |
 | ------ | ---- | ---- | ----------- |
-| GET | `/me` | Bearer token | Returns plan info, quotas, and account metadata. |
-| POST | `/token` | Admin token | Creates new API token, returns plaintext once. |
-| GET | `/tokens` | Admin | Lists tokens for current account. |
-| DELETE | `/token/{token_id}` | Admin | Revokes token by ID (path variant). |
-| POST | `/token/revoke` | Admin | Revokes token (body variant for legacy clients). |
+| GET | `https://d2.artoo.love/v1/accounts/me` | Bearer token | Returns plan info, quotas, and account metadata. |
+| POST | `https://d2.artoo.love/v1/accounts/{account_id}/tokens` | – (bootstrap) or Admin token | Creates new **API token**. If **no tokens exist** the call is unauthenticated and issues a `read`-scope token; otherwise requires an existing admin token and always issues an `admin`-scope token. |
+| GET | `https://d2.artoo.love/v1/accounts/{account_id}/tokens` | Admin | Lists tokens for current account. |
+| DELETE | `https://d2.artoo.love/v1/accounts/{account_id}/tokens/{token_id}` | Admin | Revokes token by ID (soft-delete). |
 
 ### 5.2 Policy Service (`app/routers/policy_routes.py` – prefix `/v1/policy`)
 
 | Method | Path | Notes |
 | ------ | ---- | ----- |
-| GET | `/bundle` | Fetch latest signed bundle; enforces ETag, poll-rate, size & revoke checks. |
-| PUT | `/draft` | Upload unsigned draft (tool-quota enforced). |
-| POST | `/publish` | Verify Ed25519 signature & publish as signed JWS. Supports optimistic concurrency (ETags) and force override. |
-| POST | `/revoke` | Soft-revokes latest bundle. |
+| GET | `https://d2.artoo.love/v1/policy/bundle` | Fetch latest signed bundle; enforces ETag, poll-rate, size & revoke checks. |
+| PUT | `https://d2.artoo.love/v1/policy/draft` | Upload unsigned draft (tool-quota enforced). |
+| POST | `https://d2.artoo.love/v1/policy/publish` | Verify Ed25519 signature & publish as signed JWS. Supports optimistic concurrency (ETags) and force override. |
+| POST | `https://d2.artoo.love/v1/policy/revoke` | Soft-revokes latest bundle. |
 
-### 5.3 Events (`app/routers/events_routes.py` – prefix `/v1`)  
-Streams usage events to Logflare and mirrors into `events` table.
+### 5.3 Events (`app/routers/events_routes.py` – prefix `/v1`)
 
 | Method | Path | Description |
-| POST | `/events/ingest` | Validates payload size (32 KiB hard cap), plan quota (`MAX_BATCH_BYTES`), then proxies to Logflare. |
+| ------ | ---- | ----------- |
+| POST | `https://d2.artoo.love/v1/events/ingest` | Rejects payloads > 32 KiB; enforces per-plan ingest rate via `enforce_event_limits`; optionally forwards to Logflare when `LOGFLARE_API_KEY` is set; always persists to Supabase `events`. |
 
 ### 5.4 JWKS (`app/routers/jwks_routes.py`)
 
-* **Public discovery:** `GET /.well-known/jwks.json` (rate-limited 60/min).
-* **Admin rotation:** `POST /v1/jwks/rotate` – generates fresh RSA pair, stores encrypted private key and publishes the public part.
+* **Public discovery:** `GET https://d2.artoo.love/.well-known/jwks.json` (rate-limited 60/min).
+* **Admin rotation:** `POST https://d2.artoo.love/v1/jwks/rotate` – generates fresh RSA pair, stores encrypted private key and publishes the public part.
 
 ### 5.5 Public Keys (`app/routers/keys_routes.py` – prefix `/v1/keys`)
 
 | Method | Path | Description |
-| POST | ````/v1/keys```` | Add Base64 Ed25519 public key (returns `key_added`). |
-| DELETE | `/v1/keys/{key_id}` | Soft-revoke a key. |
-| GET | `/v1/keys` | List keys; `include_revoked` query-param. |
+| ------ | ---- | ----------- |
+| POST | `https://d2.artoo.love/v1/keys` | Add Base64 Ed25519 public key (returns `key_added`). |
+| DELETE | `https://d2.artoo.love/v1/keys/{key_id}` | Soft-revoke a key. |
+| GET | `https://d2.artoo.love/v1/keys` | List keys; `include_revoked` query-param. |
 
-### 5.6 Signup (`app/routers/signup_routes.py` – prefix `/v1`)
+### 5.6 Token Bootstrap & Scopes
 
-Single **self-serve tenant onboarding** endpoint:
+The **first** token ever created for a tenant is issued **without authentication** and is limited to the `read` scope. Subsequent calls to the same endpoint must present an **admin** token and will always create `admin`-scoped tokens.
 
-| Method | Path | Description |
-| POST | `/signup` | Creates `accounts` row and returns **admin token**. |
+Supported scopes:
+
+* `read` – bundle download, metrics read, event ingest
+* `admin` – full CRUD, key management, policy publish, JWKS rotate
+* `key.upload` – add Ed25519 public keys (CLI/CI only)
 
 ---
 
@@ -205,9 +207,9 @@ The code interacts with these tables (names are hard-coded):
 
 ## 9. OpenAPI Generation
 
-`app/openapi.py` patches FastAPI’s schema generator to emit YAML and mounts a
-static `/public/openapi.yaml` route (public CORS).  The YAML is auto-regenerated
-at import time with a comment containing the generation date.
+`app/openapi.py` exposes YAML and is mounted on the public sub-app at
+`/public/openapi.yaml` (wildcard CORS). The YAML is generated at request time
+and prefixed with a generation-date comment. Cache: `public, max-age=300`.
 
 ---
 
@@ -255,15 +257,15 @@ api/                 – legacy copies of cron jobs (to be removed)
 app/
   ├ cron/            – async standalone scripts executed on schedules
   ├ routers/         – versioned REST endpoints grouped by domain
-  ├ schemas/         – Pydantic models (response/request bodies)
   ├ utils/           – cross-cutting helpers (DB, security, logger, plans…)
+  ├ models/          – Pydantic models (request/response + DB)
   ├ main.py          – ASGI app factory & configuration
   ├ openapi.py       – YAML schema generator route
   └ settings.py      – lightweight env config logic
 scripts/             – one-off helper CLIs
 public/              – generated OpenAPI YAML (committed for docs hosting)
 
- tests/              – pytest suite with Supabase stub
+tests/               – pytest suite with Supabase stub
 ```
 
 ---
@@ -272,9 +274,10 @@ public/              – generated OpenAPI YAML (committed for docs hosting)
 
 | Name | Used in | Description |
 | ---- | ------- | ----------- |
-| `SUPABASE_URL` / `SUPABASE_KEY` | `app/__init__.py` | Connection details (required). |
+| `SUPABASE_URL` / `SUPABASE_KEY` | `app/utils/dependencies.py` | Connection details (required). |
 | `APP_ENV` | `app/main.py` | `production` hides docs/openapi. |
 | `FRONTEND_ORIGIN` / `DOCS_ORIGIN` / `EXTRA_ORIGIN` | `app/settings.py` | Allowed CORS origins. |
+| `PRO_EVENT_MAX_BYTES` / `ENTERPRISE_EVENT_MAX_BYTES` | `accounts_routes.py` | Optional per-plan override for quotas.event_payload_max_bytes (default 32768). |
 | `JWK_AES_KEY` | `app/utils/security_utils` | 32-byte urlsafe-Base64 key for AES-GCM encryption. |
 | `LOGFLARE_HTTP_ENDPOINT` / `LOGFLARE_API_KEY` | `events_routes.py` | Usage event sink. |
 | `CLICKHOUSE_HTTP_ENDPOINT`, `CLICKHOUSE_USER`, `CLICKHOUSE_PASSWORD` | `cron/event_rollup.py` | Analytics export. |
@@ -284,18 +287,18 @@ public/              – generated OpenAPI YAML (committed for docs hosting)
 ## 16. How Things Fit Together
 
 1. **Clients** authenticate with a long-living **Bearer token** issued via
-   `/v1/token` (admin) or retrieved at signup.  Tokens authorize subsequent
+   `/v1/token` (admin) or obtained during the initial bootstrap call.  Tokens authorize subsequent
    access to policy, events and key management APIs.
 2. **Policy bundles** are drafted, signed using client-side Ed25519 keys and
    then **published**.  On publish the server re-signs the bundle as a JWS with
    the tenant’s private RSA key and stores it.  SDKs fetch the signed bundle
-   via `/v1/policy/bundle`, validating ETags for efficiency.
+   via `https://d2.artoo.love/v1/policy/bundle`, validating ETags for efficiency.
 3. **Usage events** are pushed to `/v1/events/ingest` – the endpoint validates
    rate limits, enforces plan quotas and forwards to Logflare.
 4. Background cron **event_rollup** exports the events table to ClickHouse for
    analytics dashboards.
 5. JWKS discovery for offline bundle verification is served at
-   `/public/.well-known/jwks.json` with strong 5-minute cache headers.
+   `https://d2.artoo.love/.well-known/jwks.json` with strong 5-minute cache headers.
 
 ---
 

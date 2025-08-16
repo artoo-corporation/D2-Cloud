@@ -91,16 +91,26 @@ def patch_db_tokens(monkeypatch):  # noqa: D401
 # ---------------------------------------------------------------------------
 
 
-def test_bootstrap_read_token(api_client, patch_verify):
-    # No tokens yet – first POST returns a read token (scoped) – header required
-    admin = make_token(ACCOUNT, ["admin"])
-    resp = api_client.post(BASE, headers={"Authorization": f"Bearer {admin}"})
+def test_bootstrap_read_token(monkeypatch, api_client, patch_verify):
+    # First POST now requires a Supabase admin JWT and returns a read token
+    from app.utils import security_utils
+    from app.utils import dependencies as deps
+
+    async def _verify(token: str, admin_only: bool = False):  # noqa: ANN001
+        assert token == "jwt_admin"
+        return ACCOUNT
+
+    # Patch both call-sites so the dependency path (deps.verify_supabase_jwt) resolves
+    monkeypatch.setattr(security_utils, "verify_supabase_jwt", _verify, raising=True)
+    monkeypatch.setattr(deps, "verify_supabase_jwt", _verify, raising=True)
+
+    resp = api_client.post(BASE, headers={"Authorization": "Bearer jwt_admin"})
     assert resp.status_code == status.HTTP_201_CREATED
     body = resp.json()
     assert body["scopes"] == ["read"]
 
 
-def test_admin_token_flow(api_client, patch_verify):
+def test_admin_token_flow(api_client, patch_verify, monkeypatch):
     # Create an admin token manually in the store then list & revoke
     admin = make_token(ACCOUNT, ["admin"])
 
@@ -110,13 +120,22 @@ def test_admin_token_flow(api_client, patch_verify):
 
     tokens = resp.json()
 
-    # If no tokens are present (store may be empty), create one through the API
+    # If no tokens are present (store may be empty), create one through the API using Supabase JWT
     if not tokens:
-        api_client.post(BASE, headers={"Authorization": f"Bearer {admin}"})
+        from app.utils import security_utils
+        from app.utils import dependencies as deps
+
+        async def _verify(token: str, admin_only: bool = False):  # noqa: ANN001
+            assert token == "jwt_admin"
+            return ACCOUNT
+
+        monkeypatch.setattr(security_utils, "verify_supabase_jwt", _verify, raising=True)
+        monkeypatch.setattr(deps, "verify_supabase_jwt", _verify, raising=True)
+        api_client.post(BASE, headers={"Authorization": "Bearer jwt_admin"})
         tokens = api_client.get(BASE, headers={"Authorization": f"Bearer {admin}"}).json()
 
     token_id = tokens[0]["token_id"]
 
     # revoke
     resp = api_client.delete(f"{BASE}/{token_id}", headers={"Authorization": f"Bearer {admin}"})
-    assert resp.status_code == status.HTTP_202_ACCEPTED 
+    assert resp.status_code == status.HTTP_202_ACCEPTED

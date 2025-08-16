@@ -74,12 +74,21 @@ def patch_verify(monkeypatch):  # noqa: D401
 
     from app.utils import security_utils as sec
 
-    async def _verify(token: str, _supabase, admin_only: bool = False, *, return_scopes=False):  # noqa: ANN001
+    async def _verify(
+        token: str,
+        _supabase,
+        admin_only: bool = False,
+        *,
+        return_scopes: bool = False,
+        return_details: bool = False,
+    ):  # noqa: ANN001
         row = _token_store.get(token)
         if row is None:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
         if admin_only and "admin" not in row["scopes"]:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN)
+        if return_details:
+            return {"account_id": row["account_id"], "scopes": row["scopes"], "token_id": row.get("token_id")}
         return (row["account_id"], row["scopes"]) if return_scopes else row["account_id"]
 
     # Patch all call-sites that imported `verify_api_token` at import-time so they

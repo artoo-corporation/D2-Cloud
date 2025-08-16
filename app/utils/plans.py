@@ -14,15 +14,44 @@ from typing import Dict, Any
 # ---------------------------------------------------------------------------
 
 PLANS: Dict[str, Dict[str, Any]] = {
-    "trial": {"max_tools": 250, "min_poll": 5, "ingest_interval": 5},
-    "essentials": {"max_tools": 25, "min_poll": 60, "ingest_interval": 60},
-    "pro": {"max_tools": 250, "min_poll": 30, "ingest_interval": 30},
-    "enterprise": {"max_tools": 10000, "min_poll": 5, "ingest_interval": 10},  # soft cap
-    "locked": {"max_tools": 0, "min_poll": 3600, "ingest_interval": None},
+    "trial": {
+        "max_tools": 250,
+        "min_poll": 5,
+        "ingest_interval": 5,
+        "max_batch_bytes": 1 * 1024 * 1024,  # 1 MiB
+    },
+    "essentials": {
+        "max_tools": 25,
+        "min_poll": 60,
+        "ingest_interval": 60,
+        "max_batch_bytes": 1 * 1024 * 1024,
+    },
+    "pro": {
+        "max_tools": 250,
+        "min_poll": 30,
+        "ingest_interval": 30,
+        "max_batch_bytes": 10 * 1024 * 1024,
+    },
+    "enterprise": {
+        "max_tools": 1000,
+        "min_poll": 30,
+        "ingest_interval": 10,
+        "max_batch_bytes": 10 * 1024 * 1024,
+    },
+    "locked": {
+        "max_tools": 0,
+        "min_poll": 300,
+        "ingest_interval": None,  # disallow ingest
+        "max_batch_bytes": 1 * 1024 * 1024,
+    },
 }
 
 # Monthly USD subscription prices (None for tiers not directly purchasable)
-PRICES: Dict[str, int | None] = {"essentials": 49, "pro": 199, "enterprise": None}
+PRICES: Dict[str, int | None] = {
+    "essentials": 49,
+    "pro": 199,
+    "enterprise": None,
+}
 
 # Universal payload size cap (bytes)
 MAX_BATCH_BYTES = 1 * 1024 * 1024  # 1 MiB
@@ -133,4 +162,4 @@ def effective_plan(account: Dict[str, Any]) -> str:  # noqa: WPS231 (simple logi
 
 def get_plan_limit(plan: str, key: str, default: int | None = None) -> int:
     """Return a numeric limit for *plan* with optional fallback."""
-    return int(PLANS.get(plan, {}).get(key, default or 0)) 
+    return int(PLANS.get(plan, {}).get(key, default or 0))

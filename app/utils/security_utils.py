@@ -10,105 +10,80 @@ import base64
 import json
 import os
 import bcrypt
+import hmac
 
 from fastapi import HTTPException, status
 from jose import jwk as jose_jwk
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from fastapi import Depends
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from app.utils.dependencies import get_supabase_async
 from app.utils.database import query_one, query_data
-from app.models import User
 from app.main import APP_ENV
 
 API_TOKEN_TABLE = "api_tokens"
 JWKS_TABLE = "jwks_keys"
 autoerror = False if APP_ENV == "development" else True
-security = HTTPBearer(auto_error=autoerror)
-
 
 # ---------------------------------------------------------------------------
 # Supabase Auth JWT verification helpers
 # ---------------------------------------------------------------------------
 
-async def verify_supabase_jwt(
-    credentials: HTTPAuthorizationCredentials = Depends(security),
-    supabase: AsyncClient = Depends(get_supabase_async),  # Inject supabase client
-) -> User:
-    """
-    Verify Supabase JWT token via supabase.auth.get_user()
-    and return the corresponding user from the database.
-    """
-    if APP_ENV == "development":
-        # logger.info(f"Using development user ID {DEV_USER_ID} for testing.")
-        return await get_user_from_users_table(supabase, DEV_USER_ID)
+async def verify_supabase_jwt(token: str, admin_only: bool = False) -> str:
+    """Validate a Supabase Auth JWT and return the caller's account_id.
 
-    token = credentials.credentials
+    Admin enforcement:
+    - If the users row contains either `is_admin` (truthy) or `role` in {"admin","owner"},
+      we enforce that when `admin_only=True`. If neither field exists, we treat
+      the user as admin for backward compatibility.
+    """
     try:
-        # Validate against Supabase Auth - use await for the async client method
-        user_response = await supabase.auth.get_user(token)  # Add await
-        supabase_user = user_response.user
+        # Acquire a supabase client via the same factory used by dependencies
+        agen = get_supabase_async()
+        supabase = await agen.__anext__()  # get first (and only) yield
+        try:
+            user_response = await supabase.auth.get_user(token)
+            supabase_user = getattr(user_response, "user", None)
+            if not supabase_user:
+                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid_supabase_token")
 
-        if not supabase_user:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid or expired token (Supabase auth failed).",
-                headers={"WWW-Authenticate": "Bearer"},  # Added header for clarity
+            user_auth_id = getattr(supabase_user, "id", None)
+            if not user_auth_id:
+                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid_supabase_token")
+
+            resp = await query_data(
+                supabase,
+                table_name="users",
+                filters={"user_id": user_auth_id},
+                select_fields="*",
             )
+            rows = getattr(resp, "data", None) or []
+            if not rows:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="user_not_found")
 
-        # Extract necessary info directly from the validated Supabase user object
-        user_auth_id = supabase_user.id
+            row = rows[0]
+            account_id = row.get("account_id") or row.get("org_id")
+            if not account_id:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="account_mapping_not_found")
 
-        if not user_auth_id:
-            # Should not happen if supabase_user exists, but belts and suspenders
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Could not extract user auth ID from validated token.",
-            )
+            if admin_only:
+                is_admin = row.get("is_admin")
+                role = row.get("role")
+                if is_admin is False or (role is not None and role not in {"admin", "owner"}):
+                    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="admin_required")
 
-        # Fetch user data from our users table using the auth ID
-        # Pass the injected supabase client to the utility function
-        user_in_db = await get_user_from_users_table(supabase, user_auth_id)
-
-        if not user_in_db:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"User record not found in database.",
-            )
-        return user_in_db
-
+            return str(account_id)
+        finally:
+            close_coro = getattr(supabase, "aclose", None)
+            if callable(close_coro):
+                await close_coro()
     except HTTPException as http_exc:
         raise http_exc
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="An internal error occurred during token verification.",
-        )
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="supabase_verification_error")
 
 
-# Make get_user_from_users_table async
-async def get_user_from_users_table(
-    supabase: AsyncClient, user_auth_id: str  # Add supabase client parameter
-) -> Union[User, None]:
-    
-    """Fetches user details from the users table based on Supabase auth ID."""
-    try:
-        # Pass the injected supabase client to query_data
-        response = await query_data(
-            supabase,  # Pass client
-            table_name="users",
-            filters={"user_id": user_auth_id},
-            select_fields="*",
-        )
-
-        # Check if data exists (response from execute() has a .data attribute)
-        if response.data:
-            user_data = response.data[0]  # Assuming user_id is unique
-        return User(**user_data)
-    except Exception as e:
-        return None
+# (helper removed – logic folded into verify_supabase_jwt)
 
 
 async def hash_token(raw: str) -> str:
@@ -118,6 +93,29 @@ async def hash_token(raw: str) -> str:
 def _verify_hash(raw: str, hashed: str) -> bool:
     return bcrypt.checkpw(raw.encode(), hashed.encode())
 
+# ---------------------------------------------------------------------------
+# Scalable token lookup helper (reuse JWK_AES_KEY as pepper)
+# ---------------------------------------------------------------------------
+
+_JWK_AES_KEY_ENV = "JWK_AES_KEY"
+
+
+def compute_token_lookup(raw_token: str) -> str | None:
+    """Return HMAC(pepper, sha256(raw_token)) using JWK_AES_KEY as pepper.
+
+    If JWK_AES_KEY is not configured (e.g., local dev), return None so callers
+    can skip the indexed lookup and fall back to the legacy path.
+    """
+    key_b64 = os.getenv(_JWK_AES_KEY_ENV)
+    if not key_b64:
+        return None
+    try:
+        pepper = base64.urlsafe_b64decode(key_b64)
+    except Exception:  # noqa: BLE001
+        return None
+    token_sha = sha256(raw_token.encode()).hexdigest()
+    return hmac.new(pepper, token_sha.encode(), sha256).hexdigest()
+
 
 async def verify_api_token(
     token: str,
@@ -125,7 +123,8 @@ async def verify_api_token(
     admin_only: bool = False,
     *,
     return_scopes: bool = False,
-) -> str | tuple[str, list[str]]:
+    return_details: bool = False,
+) -> str | tuple[str, list[str]] | dict:
     """Validate a bearer token and **optionally** return its scopes.
 
     Behaviour upgrades:
@@ -137,6 +136,9 @@ async def verify_api_token(
 
     When ``return_scopes`` is ``True`` we return ``(account_id, scopes)``.
     Existing call-sites that expect a bare ``account_id`` continue to work.
+
+    When ``return_details`` is ``True`` we return a mapping including
+    ``account_id``, ``scopes`` and ``token_id``.
     """
 
     # ------------------------------------------------------------------
@@ -147,25 +149,41 @@ async def verify_api_token(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token format")
 
     # ------------------------------------------------------------------
-    # Legacy: opaque token hashed & stored in DB
+    # Scalable lookup: use HMAC-peppered index when available; otherwise fallback
+    # to legacy full-scan with bcrypt comparisons.
     # ------------------------------------------------------------------
 
     token_sha = sha256(token.encode()).hexdigest()
-
-    resp = await query_data(
-        supabase,
-        API_TOKEN_TABLE,
-        filters={},  # full scan for salted hashes
-        select_fields="token_sha256, scopes, account_id, expires_at, revoked_at",
-    )
-
     row = None
-    for candidate in getattr(resp, "data", []) or []:
-        stored_hash = candidate["token_sha256"]
-        if stored_hash.startswith("$2b") or stored_hash.startswith("$2a"):
-            if _verify_hash(token_sha, stored_hash):
-                row = candidate
-                break
+    lookup = compute_token_lookup(token)
+    if lookup is not None:
+        # Try fast-path by keyed lookup
+        resp = await query_data(
+            supabase,
+            API_TOKEN_TABLE,
+            filters={"token_lookup": lookup},
+            select_fields="token_id,token_sha256,scopes,account_id,expires_at,revoked_at",
+        )
+        for candidate in getattr(resp, "data", []) or []:
+            stored_hash = candidate.get("token_sha256", "")
+            if stored_hash and (stored_hash.startswith("$2b") or stored_hash.startswith("$2a")):
+                if _verify_hash(token_sha, stored_hash):
+                    row = candidate
+                    break
+    if row is None:
+        # Fallback: full scan (backward compatibility, slower)
+        resp = await query_data(
+            supabase,
+            API_TOKEN_TABLE,
+            filters={},
+            select_fields="token_id,token_sha256,scopes,account_id,expires_at,revoked_at",
+        )
+        for candidate in getattr(resp, "data", []) or []:
+            stored_hash = candidate.get("token_sha256", "")
+            if stored_hash and (stored_hash.startswith("$2b") or stored_hash.startswith("$2a")):
+                if _verify_hash(token_sha, stored_hash):
+                    row = candidate
+                    break
 
     if not row:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
@@ -184,6 +202,9 @@ async def verify_api_token(
 
     if return_scopes:
         return row["account_id"], (row.get("scopes") or [])
+
+    if return_details:
+        return {"account_id": row["account_id"], "scopes": (row.get("scopes") or []), "token_id": row.get("token_id")}
 
     return row["account_id"]
 

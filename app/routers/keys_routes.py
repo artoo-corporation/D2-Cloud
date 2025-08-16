@@ -39,7 +39,7 @@ async def add_public_key(
 
     key_id = payload.key_id or str(uuid.uuid4())
 
-    await insert_data(
+    result = await insert_data(
         supabase,
         PUBLIC_KEYS_TABLE,
         {
@@ -49,6 +49,9 @@ async def add_public_key(
             "public_key": key_bytes,  # bytea column
         },
     )
+
+    if result == "duplicate":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="key_already_exists")
 
     return MessageResponse(message="key_added")
 

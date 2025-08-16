@@ -13,13 +13,19 @@ Usage:
 The dependency returns ``account_id`` so route handlers can keep using it.
 """
 
-from typing import List, Any
+from typing import Any
 import inspect
+import os
 
 from fastapi import Depends, Header, HTTPException, Request, status
 
 from app.utils.dependencies import get_supabase_async
 from app.utils.security_utils import verify_api_token
+from app import APP_ENV
+
+
+def _dev_account_id() -> str:
+    return os.getenv("D2_DEV_ACCOUNT_ID", "dev_account")
 
 
 def require_scope(*expected_scopes: str):  # noqa: D401 – factory function
@@ -29,12 +35,20 @@ def require_scope(*expected_scopes: str):  # noqa: D401 – factory function
 
     async def _checker(
         request: Request,
-        authorization: str = Header(...),
+        authorization: str | None = Header(None),
         supabase=Depends(get_supabase_async),
     ) -> str:
         """Ensure token has the required scopes and return account_id."""
 
-        token = authorization.split(" ")[-1]
+        # Development bypass: no header required in APP_ENV=development
+        if authorization is None and APP_ENV == "development":
+            account_id = _dev_account_id()
+            # Grant broad scopes so expected ⊆ effective_scopes holds
+            request.state.account_id = account_id  # type: ignore[attr-defined]
+            request.state.scopes = ["admin"]      # type: ignore[attr-defined]
+            return account_id
+
+        token = (authorization or "").split(" ")[-1]
 
         # `verify_api_token` is *async* in production, but some unit tests patch
         # it with a synchronous stub.  We therefore support both calling
@@ -69,6 +83,53 @@ def require_scope(*expected_scopes: str):  # noqa: D401 – factory function
         request.state.account_id = account_id  # type: ignore[attr-defined]
         request.state.scopes = scopes          # type: ignore[attr-defined]
 
+        return account_id
+
+    return _checker
+
+
+def require_scope_strict(*expected_scopes: str):  # noqa: D401 – factory function
+    """Return a dependency that requires explicit scopes (no admin wildcard)."""
+
+    expected: set[str] = set(expected_scopes)
+
+    async def _checker(
+        request: Request,
+        authorization: str | None = Header(None),
+        supabase=Depends(get_supabase_async),
+    ) -> str:
+        # Development bypass
+        if authorization is None and APP_ENV == "development":
+            account_id = _dev_account_id()
+            request.state.account_id = account_id  # type: ignore[attr-defined]
+            request.state.scopes = []              # type: ignore[attr-defined]
+            return account_id
+
+        token = (authorization or "").split(" ")[-1]
+
+        result: Any = verify_api_token(
+            token,
+            supabase,
+            admin_only=False,
+            return_scopes=True,
+        )
+
+        if inspect.isawaitable(result):
+            result = await result
+
+        if isinstance(result, tuple):
+            account_id, scopes = result
+        else:
+            account_id, scopes = result, []  # strict: no implicit privileges
+
+        if not expected.issubset(set(scopes)):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="insufficient_scope",
+            )
+
+        request.state.account_id = account_id  # type: ignore[attr-defined]
+        request.state.scopes = scopes          # type: ignore[attr-defined]
         return account_id
 
     return _checker 

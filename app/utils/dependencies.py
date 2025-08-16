@@ -8,8 +8,9 @@ from typing import AsyncGenerator
 
 
 # Real client factory
-from supabase import acreate_client, AsyncClient
-from app import SUPABASE_URL, SUPABASE_KEY
+from supabase import acreate_client
+from supabase import AsyncClient
+from app import SUPABASE_URL, SUPABASE_KEY, APP_ENV
 
 
 
@@ -52,15 +53,29 @@ async def get_supabase_async() -> AsyncGenerator[AsyncClient, None]:
 from fastapi import Header, Depends, HTTPException, status
 from app.utils.security_utils import verify_api_token
 from app.utils.security_utils import verify_supabase_jwt
+from pydantic import BaseModel
+
+
+class Actor(BaseModel):
+    account_id: str
+    token_id: str | None = None
+    user_id: str | None = None
+
+
+def _dev_account_id() -> str:
+    return os.getenv("D2_DEV_ACCOUNT_ID", "dev_account")
 
 
 async def require_token(
-    authorization: str = Header(...),
+    authorization: str | None = Header(None),
     supabase = Depends(get_supabase_async),
 ):
     """Dependency that verifies a *read* (or admin) D2 token and returns account_id."""
 
-    token = authorization.split(" ")[-1]
+    if authorization is None and APP_ENV == "development":
+        return _dev_account_id()
+
+    token = (authorization or "").split(" ")[-1]
     try:
         return await verify_api_token(token, supabase, admin_only=False)
     except HTTPException:
@@ -68,10 +83,12 @@ async def require_token(
 
 
 async def require_token_admin(
-    authorization: str = Header(...),
+    authorization: str | None = Header(None),
     supabase = Depends(get_supabase_async),
 ):
-    token = authorization.split(" ")[-1]
+    if authorization is None and APP_ENV == "development":
+        return _dev_account_id()
+    token = (authorization or "").split(" ")[-1]
     return await verify_api_token(token, supabase, admin_only=True)
 
 
@@ -81,12 +98,15 @@ async def require_token_admin(
 
 
 async def require_account_admin(
-    authorization: str = Header(...),
+    authorization: str | None = Header(None),
     supabase = Depends(get_supabase_async),
 ) -> str:
     """Return account_id when caller is admin via either auth mechanism."""
 
-    token = authorization.split(" ")[-1]
+    if authorization is None and APP_ENV == "development":
+        return _dev_account_id()
+
+    token = (authorization or "").split(" ")[-1]
 
     # Try Supabase admin JWT first
     try:
@@ -97,3 +117,28 @@ async def require_account_admin(
 
     # Fallback to opaque D2 admin token
     return await verify_api_token(token, supabase, admin_only=True)
+
+
+async def require_actor_admin(
+    authorization: str | None = Header(None),
+    supabase = Depends(get_supabase_async),
+) -> Actor:
+    """Return admin actor for the account with attribution (token_id/user_id)."""
+
+    if authorization is None and APP_ENV == "development":
+        dev_id = _dev_account_id()
+        return Actor(account_id=dev_id, user_id=dev_id)
+
+    token = (authorization or "").split(" ")[-1]
+
+    # Try Supabase admin JWT first
+    try:
+        account_id = await verify_supabase_jwt(token, admin_only=True)
+        return Actor(account_id=account_id, user_id=account_id)
+    except HTTPException as exc:
+        if exc.status_code not in {401, 403}:
+            raise
+
+    # Fallback to D2 admin token with details
+    details = await verify_api_token(token, supabase, admin_only=True, return_details=True)
+    return Actor(account_id=details["account_id"], token_id=details.get("token_id"))
