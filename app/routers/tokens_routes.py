@@ -150,11 +150,30 @@ async def list_tokens(
         supabase,
         API_TOKEN_TABLE,
         filters={"account_id": account_id},
-        select_fields="token_id,scopes,expires_at,revoked_at",
+        select_fields="token_id,scopes,expires_at,revoked_at,created_by_user_id,created_at",
     )
 
     rows = getattr(resp, "data", None) or []
-    return [APITokenResponse(**row) for row in rows]
+
+    # Map created_by_user_id → email via public.users table if present
+    user_ids = [row["created_by_user_id"] for row in rows if row.get("created_by_user_id")]
+    name_map: dict[str, str] = {}
+    if user_ids:
+        email_resp = await query_data(
+            supabase,
+            "users",
+            filters={"user_id": ("in", user_ids)},
+            select_fields="user_id,display_name,full_name",
+        )
+        for u in getattr(email_resp, "data", []) or []:
+            name_map[u["user_id"]] = u.get("display_name") or u.get("full_name", "")
+
+    enriched = []
+    for row in rows:
+        row["created_by_name"] = name_map.get(row.get("created_by_user_id", ""))
+        enriched.append(APITokenResponse(**row))
+
+    return enriched
 
 
 # ---------------------------------------------------------------------------

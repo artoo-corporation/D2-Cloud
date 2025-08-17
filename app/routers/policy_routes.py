@@ -52,7 +52,7 @@ async def get_policy_bundle(
     row = await query_one(
         supabase,
         POLICY_TABLE,
-        match={"account_id": account_id},
+        match={"account_id": account_id, "is_draft": False},
         order_by=("version", "desc"),
     )
     if not row:

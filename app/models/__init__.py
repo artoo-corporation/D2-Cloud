@@ -91,6 +91,8 @@ class APITokenResponse(BaseModel):
     scopes: List[str]
     expires_at: Optional[datetime]
     revoked_at: Optional[datetime]
+    created_at: Optional[datetime] = None
+    created_by_name: Optional[str] = None
 
 class TokenRevokeRequest(BaseModel):
     token_id: str = Field(..., description="Token ID to revoke")

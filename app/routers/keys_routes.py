@@ -34,6 +34,7 @@ async def add_public_key(
     # Validate base64 public key
     try:
         key_bytes = base64.b64decode(payload.public_key)
+        print(f"key_bytes: {key_bytes}")
     except Exception:  # noqa: BLE001
         raise HTTPException(status_code=400, detail="invalid_public_key")
 
