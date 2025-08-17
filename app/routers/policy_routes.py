@@ -24,7 +24,7 @@ from app.utils.plans import enforce_bundle_poll
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 import base64
 from app.utils.require_scope import require_scope
-
+from app.utils.logger import logger
 # Helper to detect "deny" statements in bundle
 
 
@@ -98,10 +98,12 @@ async def get_policy_bundle(
 @router.put("/draft", response_model=MessageResponse)
 async def upload_policy_draft(
     draft: PolicyDraft,
-    account_id: str = Depends(require_account_admin),
+    account_id: str = Depends(require_scope("policy.publish")),
     authorization: str = Header(..., description="Bearer API token"),
     supabase=Depends(get_supabase_async),
 ):
+    logger.info(f"Draft upload for account {account_id}")
+
     await insert_data(
         supabase,
         POLICY_TABLE,
@@ -112,6 +114,7 @@ async def upload_policy_draft(
             "is_draft": True,
         },
     )
+    logger.info(f"Draft uploaded for account {account_id}")
     # Audit attribution for draft
     try:
         details = await verify_api_token(authorization.split(" ")[-1], supabase, admin_only=False, return_details=True)  # type: ignore[assignment]

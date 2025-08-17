@@ -46,7 +46,7 @@ async def add_public_key(
             "account_id": account_id,
             "key_id": key_id,
             "algo": "ed25519",
-            "public_key": key_bytes,  # bytea column
+            "public_key": "\\x" + key_bytes.hex(),  # bytea hex format for PostgREST
         },
     )
 

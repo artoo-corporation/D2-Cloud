@@ -125,6 +125,7 @@ async def require_actor_admin(
 ) -> Actor:
     """Return admin actor for the account with attribution (token_id/user_id)."""
 
+    print(f"authorization: {authorization}")
     if authorization is None and APP_ENV == "development":
         dev_id = _dev_account_id()
         return Actor(account_id=dev_id, user_id=dev_id)
@@ -140,5 +141,5 @@ async def require_actor_admin(
             raise
 
     # Fallback to D2 admin token with details
-    details = await verify_api_token(token, supabase, admin_only=True, return_details=True)
+    details = await verify_api_token(token, supabase, return_details=True)
     return Actor(account_id=details["account_id"], token_id=details.get("token_id"))
