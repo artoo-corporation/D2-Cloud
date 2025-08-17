@@ -25,7 +25,7 @@ LOGFLARE_API_KEY = os.getenv("LOGFLARE_API_KEY")
 async def ingest_events(
     request: Request,
     event: EventIngest,
-    account_id: str = Depends(require_scope("policy.read")),
+    account_id: str = Depends(require_scope("event.ingest")),
     supabase=Depends(get_supabase_async),
 ):
     # account_id is provided by dependency

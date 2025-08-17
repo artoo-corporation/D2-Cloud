@@ -70,9 +70,10 @@ async def create_token(
     • "read"            – bundle download, event ingest
     • "policy.publish"  – upload & publish policy bundles (requires signature header)
     • "key.upload"      – upload developer public keys
+    • "event.ingest"    – send usage events
     • "metrics.read"    – read-only metrics endpoint (future)
-    • "server"          – read-only role (bundle download + ingest)
-    • "dev"             – shorthand for read + policy.publish + key.upload
+    • "server"          – read-only role (policy.read + event.ingest)
+    • "dev"             – shorthand for policy.read + policy.publish + key.upload + event.ingest
     • "admin"           – full wildcard (admin-only; includes all above)
     """
 
@@ -95,9 +96,9 @@ async def create_token(
             }
             if "admin" in requested:
                 scopes = ["admin"]
-            elif "dev" in requested or requested == {"policy.read", "policy.publish", "key.upload"}:
+            elif "dev" in requested or requested == {"policy.read", "policy.publish", "key.upload", "event.ingest"}:
                 scopes = ["dev"]
-            elif "server" in requested or requested == {"policy.read"}:
+            elif "server" in requested or requested == {"policy.read", "event.ingest"}:
                 scopes = ["server"]
             else:
                 _non_admin = {s.value for s in Scope if s.value not in {"admin", "dev", "server"}}
