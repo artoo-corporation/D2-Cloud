@@ -74,7 +74,7 @@ class APIKeyDB(BaseModel):
     revoked_at: Optional[datetime]
 
 class TokenCreateRequest(BaseModel):
-    name: Optional[str] = Field(None, description="Friendly label for the token")
+    token_name: Optional[str] = Field(None, description="Friendly label for the token")
     scopes: Optional[List[Scope]] = Field(
         default_factory=lambda: [Scope.read],
         description="Token capability scopes",
@@ -91,6 +91,7 @@ class APITokenResponse(BaseModel):
     scopes: List[str]
     expires_at: Optional[datetime]
     revoked_at: Optional[datetime]
+    token_name: Optional[str] = None
     created_at: Optional[datetime] = None
     created_by_name: Optional[str] = None
 

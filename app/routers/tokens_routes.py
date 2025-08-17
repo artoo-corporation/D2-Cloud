@@ -116,6 +116,7 @@ async def create_token(
         {
             "token_id": token_id,
             "token_sha256": token_sha_hashed,
+            "token_name": payload.token_name if payload and payload.token_name else None,
             **({"token_lookup": token_lookup} if token_lookup is not None else {}),
             "account_id": account_id,
             "scopes": scopes,
@@ -150,7 +151,7 @@ async def list_tokens(
         supabase,
         API_TOKEN_TABLE,
         filters={"account_id": account_id},
-        select_fields="token_id,scopes,expires_at,revoked_at,created_by_user_id,created_at",
+        select_fields="token_id,token_name,scopes,expires_at,revoked_at,created_by_user_id,created_at",
     )
 
     rows = getattr(resp, "data", None) or []
