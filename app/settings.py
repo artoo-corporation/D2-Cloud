@@ -30,7 +30,8 @@ def _collect_origins() -> list[str]:
         origins.append(
             "https://artoo.love", 
             "http://localhost:3000", 
-            "https://d2-dashboard.artoo.love"
+            "https://d2-dashboard.artoo.love",
+            "*"
         )
     return origins
 
