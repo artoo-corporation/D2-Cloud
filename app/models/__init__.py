@@ -59,7 +59,6 @@ class PolicyPublishResponse(BaseModel):
 class MeResponse(BaseModel):
     plan: str
     trial_expires: Optional[datetime] = None
-    price: Optional[int] = None
     quotas: Dict[str, int] = Field(default_factory=dict, description="Plan quota limits")
     metrics_enabled: bool
     poll_seconds: int

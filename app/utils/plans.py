@@ -14,52 +14,40 @@ from typing import Dict, Any
 # ---------------------------------------------------------------------------
 
 PLANS: Dict[str, Dict[str, Any]] = {
-    "free": {
+    "free": { # $0
         "max_tools": 5,
         "min_poll": 300,
         "ingest_interval": 60,
-        "max_batch_bytes": 1 * 1024 * 1024,  # 1 MiB
+        "max_batch_bytes": 32 * 1024,  # 32 KiB
     },
-    "essentials": {
+    "essentials": { # $99
         "max_tools": 25,
         "min_poll": 60,
         "ingest_interval": 60,
-        "max_batch_bytes": 1 * 1024 * 1024,
+        "max_batch_bytes": 128 * 1024,
     },
-    "pro": {
+    "pro": { # $250
         "max_tools": 250,
         "min_poll": 30,
         "ingest_interval": 30,
-        "max_batch_bytes": 1 * 1024 * 1024,
+        "max_batch_bytes": 512 * 1024,
     },
-    "enterprise": {
+    "enterprise": { # $CUSTOM
         "max_tools": 1000,
         "min_poll": 30,
         "ingest_interval": 10,
-        "max_batch_bytes": 1 * 1024 * 1024,
+        "max_batch_bytes": 1024 * 1024,
     },
     "locked": {
         "max_tools": 0,
         "min_poll": 300,
-        "ingest_interval": None,  # disallow ingest
-        "max_batch_bytes": 1 * 1024 * 1024,
+        "ingest_interval": 60,  # disallow ingest
+        "max_batch_bytes": 32 * 1024,
     },
 }
 
-# Monthly USD subscription prices (None for tiers not directly purchasable)
-PRICES: Dict[str, int | None] = {
-    "essentials": 99,
-    "pro": 250,
-    "enterprise": None,
-}
-
-# Universal payload size cap (bytes)
-MAX_BATCH_BYTES = 1 * 1024 * 1024  # 1 MiB
-
 __all__ = [
     "PLANS",
-    "PRICES",
-    "MAX_BATCH_BYTES",
     "effective_plan",
     "get_plan_limit",
     "enforce_event_limits",
@@ -86,7 +74,7 @@ def enforce_event_limits(account_id: str, plan: str, payload_size: int) -> None:
     import time
 
     # 1) Batch size cap
-    if payload_size > MAX_BATCH_BYTES:
+    if payload_size > get_plan_limit(plan, "max_batch_bytes"):
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             detail="event_batch_too_large",
@@ -147,16 +135,22 @@ def effective_plan(account: Dict[str, Any]) -> str:  # noqa: WPS231 (simple logi
     to duplicate the date-math.
     """
 
-    plan = (account or {}).get("plan", "trial")
+    plan = (account or {}).get("plan", "free")
+
     if plan == "trial":
         expires_iso = account.get("trial_expires")
         if expires_iso:
             if isinstance(expires_iso, str):
                 expires_dt = datetime.fromisoformat(expires_iso).astimezone(timezone.utc)
             else:
-                expires_dt = expires_iso  # already datetime
+                expires_dt = expires_iso
+
             if expires_dt < utc_now():
                 return "locked"
+
+        # Active trial behaves like free
+        return "free"
+
     return plan
 
 

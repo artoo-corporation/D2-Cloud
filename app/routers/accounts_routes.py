@@ -7,13 +7,10 @@ This router replaces the old /v1/signup path.  It creates an *accounts* row but
 via POST /v1/accounts/{account_id}/tokens (see tokens_routes.py).
 """
 
-from uuid import uuid4
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends
 
-from app.models import SignupRequest, AccountCreateResponse, PlanTier
 from app.utils.dependencies import get_supabase_async
-from app.utils.database import insert_data
 
 router = APIRouter(prefix="/v1/accounts", tags=["accounts"])
 # ---------------------------------------------------------------------------
@@ -25,7 +22,7 @@ import os  # placed here to avoid polluting top-matter
 from fastapi import Header, HTTPException
 
 from app.models import MeResponse
-from app.utils.plans import effective_plan, get_plan_limit, PRICES
+from app.utils.plans import effective_plan, get_plan_limit
 from app.utils.database import query_one
 from app.utils.require_scope import require_scope
 
@@ -42,7 +39,13 @@ async def get_me(
         raise HTTPException(status_code=404, detail="Account not found")
 
     plan = effective_plan(account)
-    plan_prefix = "PRO" if plan == "pro" else ("ENTERPRISE" if plan == "enterprise" else "FREE")
+    _prefix_map = {
+        "pro": "PRO",
+        "enterprise": "ENTERPRISE",
+        "essentials": "ESSENTIALS",
+        "free": "FREE",
+    }
+    plan_prefix = _prefix_map.get(plan, "FREE")
 
     def _env_int(key: str, default: int | None = None) -> int:  # noqa: D401
         val = os.getenv(key)
@@ -60,13 +63,12 @@ async def get_me(
         ),
         "event_batch": _env_int(f"{plan_prefix}_EVENT_BATCH", 1000),
         "max_tools": get_plan_limit(plan, "max_tools"),
-        "event_payload_max_bytes": _env_int(f"{plan_prefix}_EVENT_MAX_BYTES", 32 * 1024),
+        "event_payload_max_bytes": get_plan_limit(plan, "max_batch_bytes"),
     }
 
     return MeResponse(
         plan=plan,
         trial_expires=account.get("trial_expires"),
-        price=PRICES.get(plan),
         quotas=quotas,
         metrics_enabled=account.get("metrics_enabled", False),
         poll_seconds=quotas["poll_sec"],
