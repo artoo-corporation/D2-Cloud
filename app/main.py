@@ -89,6 +89,8 @@ def create_app() -> FastAPI:  # noqa: C901
     # -------------------------------------------------------------------
     # Private-API CORS (env-driven allow-list)
     # -------------------------------------------------------------------
+
+    print(f"ALLOWED_ORIGINS: {ALLOWED_ORIGINS}")
     app.add_middleware(
         CORSMiddleware,
         allow_origins=ALLOWED_ORIGINS,
