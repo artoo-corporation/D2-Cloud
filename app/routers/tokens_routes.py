@@ -85,9 +85,9 @@ async def create_token(
     existing = await _token_count(supabase, account_id)
 
     if existing == 0:
-        scopes = ["read"]
+        scopes = ["policy.read"]
     else:
-        scopes = ["read"]
+        scopes = ["policy.read"]
         if payload and payload.scopes:
             requested = {
                 s.value if isinstance(s, Scope) else str(s)
@@ -95,9 +95,9 @@ async def create_token(
             }
             if "admin" in requested:
                 scopes = ["admin"]
-            elif "dev" in requested or requested == {"read", "policy.publish", "key.upload"}:
+            elif "dev" in requested or requested == {"policy.read", "policy.publish", "key.upload"}:
                 scopes = ["dev"]
-            elif "server" in requested or requested == {"read"}:
+            elif "server" in requested or requested == {"policy.read"}:
                 scopes = ["server"]
             else:
                 _non_admin = {s.value for s in Scope if s.value not in {"admin", "dev", "server"}}

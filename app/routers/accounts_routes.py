@@ -29,7 +29,7 @@ from app.utils.require_scope import require_scope
 
 @router.get("/me", response_model=MeResponse)
 async def get_me(
-    account_id: str = Depends(require_scope("read")),
+    account_id: str = Depends(require_scope("policy.read")),
     supabase=Depends(get_supabase_async),
 ):
     """Return plan, quotas and misc account metadata for the caller."""

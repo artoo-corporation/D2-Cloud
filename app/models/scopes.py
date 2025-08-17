@@ -8,7 +8,7 @@ class Scope(str, Enum):
     ``require_scope`` at runtime.
     """
 
-    read = "read"
+    read = "policy.read"
     admin = "admin"
     key_upload = "key.upload"
     policy_publish = "policy.publish"

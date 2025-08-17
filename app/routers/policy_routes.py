@@ -45,7 +45,7 @@ POLICY_TABLE = "policies"
 @router.get("/bundle", response_model=PolicyBundleResponse)
 async def get_policy_bundle(
     response: Response,
-    account_id: str = Depends(require_scope("read")),
+    account_id: str = Depends(require_scope("policy.read")),
     if_none_match: str | None = Header(None, alias="If-None-Match"),
     supabase=Depends(get_supabase_async),
 ):

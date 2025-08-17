@@ -74,9 +74,9 @@ def require_scope(*expected_scopes: str):  # noqa: D401 – factory function
 
         # Expand dev shorthand to its component capabilities
         if "dev" in effective_scopes:
-            effective_scopes |= {"read", "policy.publish", "key.upload"}
+            effective_scopes |= {"policy.read", "policy.publish", "key.upload"}
         if "server" in effective_scopes:
-            effective_scopes |= {"read"}
+            effective_scopes |= {"policy.read"}
 
         # Admin scope acts as wildcard
         if "admin" not in effective_scopes and not expected.issubset(effective_scopes):
@@ -130,9 +130,9 @@ def require_scope_strict(*expected_scopes: str):  # noqa: D401 – factory funct
 
         expanded_scopes = set(scopes)
         if "dev" in expanded_scopes:
-            expanded_scopes |= {"read", "policy.publish", "key.upload"}
+            expanded_scopes |= {"policy.read", "policy.publish", "key.upload"}
         if "server" in expanded_scopes:
-            expanded_scopes |= {"read"}
+            expanded_scopes |= {"policy.read"}
 
         if not expected.issubset(expanded_scopes):
             raise HTTPException(
