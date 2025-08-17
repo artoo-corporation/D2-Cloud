@@ -14,10 +14,10 @@ from typing import Dict, Any
 # ---------------------------------------------------------------------------
 
 PLANS: Dict[str, Dict[str, Any]] = {
-    "trial": {
-        "max_tools": 250,
-        "min_poll": 5,
-        "ingest_interval": 5,
+    "free": {
+        "max_tools": 5,
+        "min_poll": 300,
+        "ingest_interval": 60,
         "max_batch_bytes": 1 * 1024 * 1024,  # 1 MiB
     },
     "essentials": {
@@ -30,13 +30,13 @@ PLANS: Dict[str, Dict[str, Any]] = {
         "max_tools": 250,
         "min_poll": 30,
         "ingest_interval": 30,
-        "max_batch_bytes": 10 * 1024 * 1024,
+        "max_batch_bytes": 1 * 1024 * 1024,
     },
     "enterprise": {
         "max_tools": 1000,
         "min_poll": 30,
         "ingest_interval": 10,
-        "max_batch_bytes": 10 * 1024 * 1024,
+        "max_batch_bytes": 1 * 1024 * 1024,
     },
     "locked": {
         "max_tools": 0,
@@ -48,8 +48,8 @@ PLANS: Dict[str, Dict[str, Any]] = {
 
 # Monthly USD subscription prices (None for tiers not directly purchasable)
 PRICES: Dict[str, int | None] = {
-    "essentials": 49,
-    "pro": 199,
+    "essentials": 99,
+    "pro": 250,
     "enterprise": None,
 }
 

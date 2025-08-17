@@ -72,6 +72,12 @@ def require_scope(*expected_scopes: str):  # noqa: D401 – factory function
 
         effective_scopes = set(scopes)
 
+        # Expand dev shorthand to its component capabilities
+        if "dev" in effective_scopes:
+            effective_scopes |= {"read", "policy.publish", "key.upload"}
+        if "server" in effective_scopes:
+            effective_scopes |= {"read"}
+
         # Admin scope acts as wildcard
         if "admin" not in effective_scopes and not expected.issubset(effective_scopes):
             raise HTTPException(
@@ -122,7 +128,13 @@ def require_scope_strict(*expected_scopes: str):  # noqa: D401 – factory funct
         else:
             account_id, scopes = result, []  # strict: no implicit privileges
 
-        if not expected.issubset(set(scopes)):
+        expanded_scopes = set(scopes)
+        if "dev" in expanded_scopes:
+            expanded_scopes |= {"read", "policy.publish", "key.upload"}
+        if "server" in expanded_scopes:
+            expanded_scopes |= {"read"}
+
+        if not expected.issubset(expanded_scopes):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="insufficient_scope",

@@ -1,6 +1,7 @@
 from supabase import AsyncClient
 from typing import Optional
 from .logger import logger
+from datetime import datetime, timezone
 
 
 async def insert_data(
@@ -152,6 +153,12 @@ async def update_data(
                         query = query.is_(key, value)
                 else:  # Default to equality check
                     query = query.eq(key, condition)
+
+        # JSON-safe: convert datetime objects to ISO format
+        if update_values:
+            for k, v in list(update_values.items()):
+                if isinstance(v, datetime):
+                    update_values[k] = v.astimezone(timezone.utc).isoformat()
 
         # Execute the update
         response = await query.execute()

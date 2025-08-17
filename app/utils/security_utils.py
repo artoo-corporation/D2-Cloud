@@ -67,9 +67,8 @@ async def verify_supabase_jwt(token: str, admin_only: bool = False) -> str:
                 raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="account_mapping_not_found")
 
             if admin_only:
-                is_admin = row.get("is_admin")
                 role = row.get("role")
-                if is_admin is False or (role is not None and role not in {"admin", "owner"}):
+                if role is not None and role not in {"admin", "owner"}:
                     raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="admin_required")
 
             return str(account_id)

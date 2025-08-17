@@ -18,6 +18,9 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
+# External enums -------------------------------------------------------------
+from app.models.scopes import Scope
+
 # ---------------------------------------------------------------------------
 # Enums – shareable across request / DB models
 # ---------------------------------------------------------------------------
@@ -73,7 +76,10 @@ class APIKeyDB(BaseModel):
 
 class TokenCreateRequest(BaseModel):
     name: Optional[str] = Field(None, description="Friendly label for the token")
-    scopes: Optional[List[str]] = Field(default_factory=lambda: ["read"], description="Token scopes")
+    scopes: Optional[List[Scope]] = Field(
+        default_factory=lambda: [Scope.read],
+        description="Token capability scopes",
+    )
 
 class TokenCreateResponse(BaseModel):
     token_id: str

@@ -14,7 +14,7 @@ from uuid import uuid4
 from hashlib import sha256
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Path, status
+from fastapi import APIRouter, Depends, HTTPException, Path, status
 
 from app.models import (
     APITokenResponse,
@@ -22,10 +22,11 @@ from app.models import (
     TokenCreateRequest,
     TokenCreateResponse,
 )
+from app.models.scopes import Scope
 from app.utils.dependencies import get_supabase_async, require_token_admin, require_actor_admin, Actor
 from app.utils.database import insert_data, query_data, update_data
 from app.utils.security_utils import hash_token, compute_token_lookup
-
+from app.utils.logger import logger
 API_TOKEN_TABLE = "api_tokens"
 TOKEN_PREFIX = "d2_"
 
@@ -63,7 +64,16 @@ async def create_token(
     Behaviour:
     • Caller must be an authenticated Supabase user for the same account.
     • If this is the first token for the account, scopes are forced to ["read"].
-    • Otherwise, scopes default to ["admin"] unless explicitly narrowed by payload.
+    • Otherwise, scopes default to ["read"] unless explicitly narrowed by payload.
+
+    Allowed scopes:
+    • "read"            – bundle download, event ingest
+    • "policy.publish"  – upload & publish policy bundles (requires signature header)
+    • "key.upload"      – upload developer public keys
+    • "metrics.read"    – read-only metrics endpoint (future)
+    • "server"          – read-only role (bundle download + ingest)
+    • "dev"             – shorthand for read + policy.publish + key.upload
+    • "admin"           – full wildcard (admin-only; includes all above)
     """
 
     # Enforce Supabase session and account match
@@ -77,10 +87,21 @@ async def create_token(
     if existing == 0:
         scopes = ["read"]
     else:
-        scopes = ["admin"]
+        scopes = ["read"]
         if payload and payload.scopes:
-            requested = set(payload.scopes)
-            scopes = ["admin"] if "admin" in requested else list(requested or {"read"})
+            requested = {
+                s.value if isinstance(s, Scope) else str(s)
+                for s in payload.scopes
+            }
+            if "admin" in requested:
+                scopes = ["admin"]
+            elif "dev" in requested or requested == {"read", "policy.publish", "key.upload"}:
+                scopes = ["dev"]
+            elif "server" in requested or requested == {"read"}:
+                scopes = ["server"]
+            else:
+                _non_admin = {s.value for s in Scope if s.value not in {"admin", "dev", "server"}}
+                scopes = ["admin"] if requested.issuperset(_non_admin) else list(requested or {"read"})
 
     # Generate token & identifiers
     raw_token = f"{TOKEN_PREFIX}{secrets.token_urlsafe(32)}"
