@@ -88,7 +88,22 @@ async def list_keys(
         supabase,
         PUBLIC_KEYS_TABLE,
         filters=filters,
-        select_fields="key_id,algo,created_at,revoked_at",
+        select_fields="key_id,algo,public_key,created_at,revoked_at",
     )
     rows = getattr(resp, "data", None) or []
-    return [PublicKeyResponse(**row) for row in rows] 
+    
+    # Convert public keys from hex format back to base64
+    result = []
+    for row in rows:
+        public_key_raw = row["public_key"]
+        if isinstance(public_key_raw, str) and public_key_raw.startswith("\\x"):
+            # Convert hex back to base64
+            try:
+                key_bytes = bytes.fromhex(public_key_raw[2:])
+                row["public_key"] = base64.b64encode(key_bytes).decode()
+            except ValueError:
+                # Skip malformed keys
+                continue
+        result.append(PublicKeyResponse(**row))
+    
+    return result 

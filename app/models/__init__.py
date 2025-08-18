@@ -122,8 +122,10 @@ class PublicKeyAddRequest(BaseModel):
 class PublicKeyResponse(BaseModel):
     key_id: str
     algo: str = Field(default="ed25519")
+    public_key: str = Field(..., description="Base64-encoded Ed25519 public key")
     created_at: datetime
     revoked_at: Optional[datetime]
+    
 
 class AccountCreateResponse(BaseModel):
     """Returned by the (now optional) account-bootstrap endpoint."""

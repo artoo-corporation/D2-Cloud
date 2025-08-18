@@ -236,9 +236,15 @@ def _get_aes_key() -> bytes | None:
     if not key_b64:
         return None
     try:
-        return base64.urlsafe_b64decode(key_b64)
-    except Exception:  # noqa: BLE001
-        raise RuntimeError(f"Invalid {_AES_KEY_ENV} – must be base64url-encoded 32-byte key")
+        # Add padding if needed for base64url decoding
+        padding_needed = (4 - len(key_b64) % 4) % 4
+        key_b64_padded = key_b64 + '=' * padding_needed
+        key_bytes = base64.urlsafe_b64decode(key_b64_padded)
+        if len(key_bytes) != 32:
+            raise RuntimeError(f"Invalid {_AES_KEY_ENV} – decoded key is {len(key_bytes)} bytes, expected 32 bytes")
+        return key_bytes
+    except Exception as e:  # noqa: BLE001
+        raise RuntimeError(f"Invalid {_AES_KEY_ENV} – must be base64url-encoded 32-byte key. Error: {e}")
 
 
 def encrypt_private_jwk(jwk: Dict[str, Any]) -> str:

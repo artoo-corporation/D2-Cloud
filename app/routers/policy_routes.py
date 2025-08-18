@@ -25,16 +25,6 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 import base64
 from app.utils.require_scope import require_scope
 from app.utils.logger import logger
-# Helper to detect "deny" statements in bundle
-
-
-def _count_denies(obj: dict | list) -> int:  # noqa: WPS231
-    if isinstance(obj, list):
-        return sum(_count_denies(item) for item in obj)
-    if isinstance(obj, dict):
-        deny_here = 1 if obj.get("effect") == "deny" else 0
-        return deny_here + sum(_count_denies(v) for v in obj.values())
-    return 0
 
 router = APIRouter(prefix="/v1/policy", tags=["policy"])
 
@@ -148,7 +138,6 @@ async def publish_policy(
     x_d2_key_id: str = Header(..., alias="X-D2-Key-Id"),
     if_none_match: str | None = Header(None, alias="If-None-Match"),
     if_match: str | None = Header(None, alias="If-Match"),
-    force: bool = Query(False),
     account_id: str = Depends(require_scope("policy.publish")),
     authorization: str = Header(..., description="Bearer API token"),
     supabase=Depends(get_supabase_async),
@@ -176,11 +165,13 @@ async def publish_policy(
             provided_etag = if_none_match.lstrip("W/").strip('"')
 
         if provided_etag is None or provided_etag != current_etag:
+            logger.error(f"ETag mismatch for account {account_id}: provided={provided_etag}, current={current_etag}")
             raise HTTPException(status_code=409, detail="etag_mismatch")
 
     else:
         # First publish ever – still require header but allow "*"
         if not (if_match or if_none_match):
+            logger.error(f"No ETag header provided for first publish, account {account_id}")
             raise HTTPException(status_code=409, detail="etag_mismatch")
 
     # ------------------------------------------------------------------
@@ -192,6 +183,7 @@ async def publish_policy(
         supabase, POLICY_TABLE, match={"account_id": account_id, "is_draft": True}, order_by=("version", "desc")
     )
     if not draft_row:
+        logger.error(f"No draft found for account {account_id}")
         raise HTTPException(status_code=400, detail="No draft to publish. Please upload a draft first at /v1/policy/draft")
 
     # ------------------------------------------------------------------
@@ -200,19 +192,11 @@ async def publish_policy(
 
     latest_version = latest_published["version"] if latest_published else 0
     if draft_row["version"] < latest_version:
+        logger.error(f"Version rollback detected for account {account_id}: draft_version={draft_row['version']}, latest_version={latest_version}")
         raise HTTPException(status_code=409, detail="version_rollback")
 
     logger.info(f"Latest version: {latest_version}")
     new_version = latest_version + 1
-
-    # ------------------------------------------------------------------
-    # Deny-rule guard
-    # ------------------------------------------------------------------
-
-    deny_count = _count_denies(draft_row["bundle"])
-    if deny_count == 0 and not force:
-        raise HTTPException(status_code=400, detail="no_deny_rules")
-
     # ------------------------------------------------------------------
     # Signature verification (Ed25519)
     # ------------------------------------------------------------------
@@ -223,27 +207,40 @@ async def publish_policy(
     )
 
     if not key_row:
+        logger.error(f"Key not found for account {account_id}, key_id={x_d2_key_id}")
         raise HTTPException(status_code=404, detail="key_not_found")
     if key_row.get("revoked_at") is not None:
+        logger.error(f"Key revoked for account {account_id}, key_id={x_d2_key_id}")
         raise HTTPException(status_code=403, detail="key_revoked")
 
     public_key_raw = key_row["public_key"]
     if isinstance(public_key_raw, str):
-        try:
-            public_key_bytes = base64.b64decode(public_key_raw)
-        except Exception:
-            public_key_bytes = public_key_raw.encode()
+        # Handle hex format from PostgREST bytea (e.g., "\\x9f4c...")
+        if public_key_raw.startswith("\\x"):
+            try:
+                public_key_bytes = bytes.fromhex(public_key_raw[2:])
+            except ValueError as e:
+                logger.error(f"Failed to decode hex public key for account {account_id}: {e}")
+                raise HTTPException(status_code=400, detail="invalid_public_key_format")
+        else:
+            # Handle base64 format
+            try:
+                public_key_bytes = base64.b64decode(public_key_raw)
+            except Exception:
+                public_key_bytes = public_key_raw.encode()
     else:
         public_key_bytes = public_key_raw
 
     try:
         signature = base64.b64decode(x_d2_signature)
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"Failed to decode signature for account {account_id}: {e}")
         raise HTTPException(status_code=400, detail="invalid_signature")
 
     try:
         Ed25519PublicKey.from_public_bytes(public_key_bytes).verify(signature, await request.body())
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"Signature verification failed for account {account_id}: {e}")
         raise HTTPException(status_code=400, detail="invalid_signature")
 
     # ------------------------------------------------------------------
@@ -262,18 +259,6 @@ async def publish_policy(
             "version": new_version,
         },
     )
-
-    if force:
-        await insert_data(
-            supabase,
-            "audit_logs",
-            {
-                "actor_id": account_id,
-                "action": "force_publish",
-                "token_id": None,
-                "ip": None,
-            },
-        )
 
     # Build response with additional headers
     response = PolicyPublishResponse(jws=jws, version=new_version)
