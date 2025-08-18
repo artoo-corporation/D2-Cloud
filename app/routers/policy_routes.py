@@ -56,7 +56,15 @@ async def get_policy_bundle(
         order_by=("version", "desc"),
     )
     if not row:
-        raise HTTPException(status_code=404, detail="No policy found for account")
+        # Fallback to latest draft for preview purposes
+        row = await query_one(
+            supabase,
+            POLICY_TABLE,
+            match={"account_id": account_id, "is_draft": True},
+            order_by=("version", "desc"),
+        )
+        if not row:
+            raise HTTPException(status_code=404, detail="No policy found for account")
 
     # 4️⃣  Revocation enforcement
     if row.get("revocation_time") and datetime.fromisoformat(row["revocation_time"]).astimezone(timezone.utc) < datetime.now(timezone.utc):
@@ -80,8 +88,8 @@ async def get_policy_bundle(
 
     etag = sha256(row["jws"].encode()).hexdigest()
 
-    # If-None-Match header present and matches → 304 Not Modified
-    if if_none_match:
+    # If-None-Match only applies to published bundles
+    if not row.get("is_draft", False) and if_none_match:
         client_etag = if_none_match.lstrip("W/").strip('"')
         if client_etag == etag:
             response.status_code = status.HTTP_304_NOT_MODIFIED
@@ -156,6 +164,8 @@ async def publish_policy(
         order_by=("version", "desc"),
     )
 
+    logger.info(f"Latest published policy: {latest_published}")
+
     if latest_published:
         current_etag = sha256(latest_published["jws"].encode()).hexdigest()
 
@@ -177,6 +187,7 @@ async def publish_policy(
     # Fetch draft
     # ------------------------------------------------------------------
 
+
     draft_row = await query_one(
         supabase, POLICY_TABLE, match={"account_id": account_id, "is_draft": True}, order_by=("version", "desc")
     )
@@ -191,6 +202,7 @@ async def publish_policy(
     if draft_row["version"] < latest_version:
         raise HTTPException(status_code=409, detail="version_rollback")
 
+    logger.info(f"Latest version: {latest_version}")
     new_version = latest_version + 1
 
     # ------------------------------------------------------------------
