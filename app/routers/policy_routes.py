@@ -15,9 +15,11 @@ from app.models import (
     PolicyBundleResponse,
     PolicyDraft,
     PolicyPublishResponse,
+    PolicyVersionResponse,
+    PolicyRevertRequest,
     MessageResponse,
 )
-from app.utils.database import insert_data, query_one, update_data
+from app.utils.database import insert_data, query_one, query_many, update_data
 from app.utils.dependencies import get_supabase_async, require_account_admin
 from app.utils.security_utils import get_active_private_jwk, verify_api_token
 from app.utils.plans import enforce_bundle_poll
@@ -39,11 +41,11 @@ async def get_policy_bundle(
     if_none_match: str | None = Header(None, alias="If-None-Match"),
     supabase=Depends(get_supabase_async),
 ):
+    # First try to get the active published policy
     row = await query_one(
         supabase,
         POLICY_TABLE,
-        match={"account_id": account_id, "is_draft": False},
-        order_by=("version", "desc"),
+        match={"account_id": account_id, "is_draft": False, "active": True},
     )
     if not row:
         # Fallback to latest draft for preview purposes
@@ -102,16 +104,49 @@ async def upload_policy_draft(
 ):
     logger.info(f"Draft upload for account {account_id}")
 
-    await insert_data(
+    # Auto-generate next draft version
+    # Check highest version across both drafts and published policies
+    latest_draft = await query_one(
         supabase,
         POLICY_TABLE,
-        {
-            "account_id": account_id,
-            "version": draft.version,
-            "bundle": draft.bundle,
-            "is_draft": True,
-        },
+        match={"account_id": account_id, "is_draft": True},
+        order_by=("version", "desc"),
     )
+    
+    latest_published = await query_one(
+        supabase,
+        POLICY_TABLE,
+        match={"account_id": account_id, "is_draft": False},
+        order_by=("version", "desc"),
+    )
+    
+    # Get the highest version from either drafts or published
+    draft_version = latest_draft["version"] if latest_draft else 0
+    published_version = latest_published["version"] if latest_published else 0
+    next_version = max(draft_version, published_version) + 1
+    
+    # Delete any existing draft (we only keep one)
+    if latest_draft:
+        await update_data(
+            supabase,
+            POLICY_TABLE,
+            keys={"id": latest_draft["id"]},
+            values={"bundle": draft.bundle, "version": next_version},
+        )
+        logger.info(f"Updated existing draft to version {next_version} for account {account_id}")
+    else:
+        # Create new draft
+        await insert_data(
+            supabase,
+            POLICY_TABLE,
+            {
+                "account_id": account_id,
+                "version": next_version,
+                "bundle": draft.bundle,
+                "is_draft": True,
+            },
+        )
+        logger.info(f"Created new draft version {next_version} for account {account_id}")
     logger.info(f"Draft uploaded for account {account_id}")
     # Audit attribution for draft
     try:
@@ -149,8 +184,7 @@ async def publish_policy(
     latest_published = await query_one(
         supabase,
         POLICY_TABLE,
-        match={"account_id": account_id, "is_draft": False},
-        order_by=("version", "desc"),
+        match={"account_id": account_id, "is_draft": False, "active": True},
     )
 
     logger.info(f"Latest published policy: {latest_published}")
@@ -248,6 +282,16 @@ async def publish_policy(
 
     jws = jwt.encode(draft_row["bundle"], private_jwk, algorithm=JWT_ALGORITHM)
 
+    # First, deactivate any currently active policy for this account
+    if latest_published:
+        await update_data(
+            supabase,
+            POLICY_TABLE,
+            keys={"account_id": account_id, "is_draft": False, "active": True},
+            values={"active": False},
+        )
+
+    # Then publish the new policy as active
     await update_data(
         supabase,
         POLICY_TABLE,
@@ -257,6 +301,7 @@ async def publish_policy(
             "is_draft": False,
             "published_at": datetime.now(timezone.utc),
             "version": new_version,
+            "active": True,
         },
     )
 
@@ -315,3 +360,71 @@ async def revoke_policy(
         values={"revocation_time": datetime.now(timezone.utc)},
     )
     return MessageResponse(message="Policy revoked")
+
+
+@router.get("/versions", response_model=list[PolicyVersionResponse])
+async def list_policy_versions(
+    account_id: str = Depends(require_account_admin),
+    supabase=Depends(get_supabase_async),
+):
+    """List all published policy versions for an account, ordered by version desc."""
+    rows = await query_many(
+        supabase,
+        POLICY_TABLE,
+        match={"account_id": account_id, "is_draft": False},
+        order_by=("version", "desc"),
+        select_fields="id,version,active,published_at,revocation_time",
+    )
+    
+    return [PolicyVersionResponse(**row) for row in rows]
+
+
+@router.post("/revert", response_model=MessageResponse)
+async def revert_policy(
+    request: PolicyRevertRequest,
+    account_id: str = Depends(require_account_admin),
+    supabase=Depends(get_supabase_async),
+):
+    """Revert to a specific policy version by making it active."""
+    
+    # Verify the target policy exists and belongs to this account
+    target_policy = await query_one(
+        supabase,
+        POLICY_TABLE,
+        match={"id": request.policy_id, "account_id": account_id, "is_draft": False},
+    )
+    if not target_policy:
+        raise HTTPException(status_code=404, detail="Policy version not found")
+    
+    # Check if policy is revoked
+    if target_policy.get("revocation_time"):
+        raise HTTPException(status_code=409, detail="Cannot revert to a revoked policy")
+    
+    # Check if it's already active
+    if target_policy.get("active"):
+        raise HTTPException(status_code=409, detail="Policy version is already active")
+    
+    # Deactivate current active policy
+    current_active = await query_one(
+        supabase,
+        POLICY_TABLE,
+        match={"account_id": account_id, "is_draft": False, "active": True},
+    )
+    
+    if current_active:
+        await update_data(
+            supabase,
+            POLICY_TABLE,
+            keys={"id": current_active["id"]},
+            values={"active": False},
+        )
+    
+    # Activate the target policy
+    await update_data(
+        supabase,
+        POLICY_TABLE,
+        keys={"id": request.policy_id},
+        values={"active": True},
+    )
+    
+    return MessageResponse(message=f"Reverted to policy version {target_policy['version']}")
