@@ -254,6 +254,7 @@ async def upload_policy_draft(
             {
                 "actor_id": account_id,
                 "token_id": details.get("token_id"),
+                "user_id": details.get("user_id"),
                 "action": "policy_draft",
                 "version": draft.version,
             },
@@ -464,6 +465,7 @@ async def publish_policy(
             {
                 "actor_id": account_id,
                 "token_id": details.get("token_id"),
+                "user_id": details.get("user_id"),
                 "action": "policy_publish",
                 "key_id": x_d2_key_id,
                 "version": new_version,

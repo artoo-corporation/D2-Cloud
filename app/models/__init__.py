@@ -183,3 +183,23 @@ class PolicySummary(BaseModel):
     revocation_time: datetime | None = None
     is_revoked: bool = False
     bundle: dict | None = None
+
+
+class EventRecord(BaseModel):
+    id: str
+    occurred_at: datetime
+    event_type: str
+    payload: dict
+    ingested_at: datetime
+    host: str | None = None
+    source_ip: str | None = None
+
+class AuditLogRecord(BaseModel):
+    id: int
+    actor_id: str
+    token_id: str | None = None
+    user_id: str | None = None
+    action: str
+    key_id: str | None = None
+    version: int | None = None
+    created_at: datetime

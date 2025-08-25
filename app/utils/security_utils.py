@@ -203,7 +203,12 @@ async def verify_api_token(
         return row["account_id"], (row.get("scopes") or [])
 
     if return_details:
-        return {"account_id": row["account_id"], "scopes": (row.get("scopes") or []), "token_id": row.get("token_id")}
+        return {
+            "account_id": row["account_id"],
+            "scopes": scopes,
+            "token_id": row.get("token_id"),
+            "user_id": row.get("created_by_user_id"),
+        }
 
     return row["account_id"]
 

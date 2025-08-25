@@ -138,11 +138,12 @@ def create_app() -> FastAPI:  # noqa: C901
     install_openapi_route(public_app)
 
     # Register private routers – explicit order matters for overrides
-    from app.routers import policy_routes, events_routes, keys_routes, accounts_routes, tokens_routes
+    from app.routers import policy_routes, events_routes, keys_routes, accounts_routes, tokens_routes, audit_routes
     app.include_router(policy_routes.router)
     app.include_router(keys_routes.router)
     app.include_router(jwks_admin_router)
     app.include_router(events_routes.router)
+    app.include_router(audit_routes.router)
     # Resource-oriented routers
     app.include_router(accounts_routes.router)
     app.include_router(tokens_routes.router)

@@ -180,6 +180,8 @@ async def query_one(
     supabase: AsyncClient,
     table_name: str,
     match: dict | None = None,
+    *,
+    or_filter: str | None = None,
     order_by: tuple | None = None,
     select_fields: str = "*",
 ):
@@ -204,20 +206,56 @@ async def query_many(
     supabase: AsyncClient,
     table_name: str,
     match: dict | None = None,
+    *,
+    or_filter: str | None = None,
     order_by: tuple | None = None,
     select_fields: str = "*",
     limit: int | None = None,
 ):
     """Return a list of rows that match the filters (empty list if none)."""
-    resp = await query_data(
-        supabase,
-        table_name,
-        filters=match or {},
-        order_by=order_by,
-        select_fields=select_fields,
-        limit=limit,
-    )
-    return getattr(resp, "data", None) or []
+    query = supabase.table(table_name).select(select_fields)
+
+    # Apply simple filters
+    if match:
+        for key, condition in match.items():
+            if isinstance(condition, tuple):  # Special operator cases
+                operator, value = condition
+                if operator == "in":
+                    query = query.in_(key, value)
+                elif operator == "is":
+                    query = query.is_(key, value)
+                elif operator == "gt":
+                    query = query.gt(key, value)
+                elif operator == "lt":
+                    query = query.lt(key, value)
+                elif operator == "gte":
+                    query = query.gte(key, value)
+                elif operator == "lte":
+                    query = query.lte(key, value)
+                elif operator == "like":
+                    query = query.like(key, value)
+                elif operator == "ilike":
+                    query = query.ilike(key, value)
+                elif operator == "neq":
+                    query = query.neq(key, value)
+            else:  # Default to equality check
+                query = query.eq(key, condition)
+
+    # Apply ordering if provided
+    if order_by:
+        col, direction = order_by
+        query = query.order(col, desc=(direction == "desc"))
+
+    # Compound OR filter support (raw string)
+    if or_filter:
+        query = query.or_(or_filter)
+
+    # Apply limit if provided
+    if limit:
+        query = query.limit(limit)
+
+    # Await the execute() call
+    return await query.execute()
 
 
 # ---------------------------------------------------------------------------

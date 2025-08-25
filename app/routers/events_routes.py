@@ -5,7 +5,8 @@ from __future__ import annotations
 import os
 
 import httpx
-from fastapi import APIRouter, Depends, Header, HTTPException, status, Request
+from fastapi import APIRouter, Depends, HTTPException, status, Request, Query
+from fastapi.responses import JSONResponse
 
 from app.models import MessageResponse
 from app.models.events import EventIngest
@@ -14,6 +15,7 @@ from app.utils.require_scope import require_scope
 from app.utils.plans import enforce_event_limits, effective_plan
 from app.utils.database import query_one
 from datetime import datetime, timezone
+from app.models import EventRecord
 
 router = APIRouter(prefix="/v1", tags=["events"])
 
@@ -86,4 +88,43 @@ async def ingest_events(
         }
     ).execute()
 
-    return MessageResponse(message="Events accepted") 
+    return MessageResponse(message="Events accepted")
+
+
+@router.get("/events", response_model=list[EventRecord])
+async def list_events(
+    limit: int = Query(100, ge=1, le=1000),
+    cursor: str | None = Query(None, description="Cursor of form '<iso>,<uuid>' from X-Next-Cursor header"),
+    account_id: str = Depends(require_scope("metrics.read")),
+    supabase=Depends(get_supabase_async),
+):
+    # Build query manually to support compound cursor
+    tbl = supabase.table("events").select(
+        "id,occurred_at,event_type,payload,ingested_at,host,source_ip"
+    ).eq("account_id", account_id)
+
+    if cursor:
+        try:
+            ts_str, id_cursor = cursor.split(",", 1)
+            ts_val = datetime.fromisoformat(ts_str)
+        except Exception:
+            raise HTTPException(status_code=400, detail="invalid_cursor")
+
+        iso = ts_val.isoformat()
+        tbl = tbl.or_(f"ingested_at.lt.{iso},and(ingested_at.eq.{iso},id.lt.{id_cursor})")
+
+    tbl = tbl.order("ingested_at", desc=True).order("id", desc=True).limit(limit)
+
+    resp = await tbl.execute()
+    rows = getattr(resp, "data", None) or []
+
+    # Compute next cursor (oldest ingested_at in this page)
+    if rows:
+        next_cursor = f"{rows[-1]['ingested_at']},{rows[-1]['id']}"
+    else:
+        next_cursor = None
+
+    return JSONResponse(
+        content=[EventRecord(**r).model_dump(mode="json") for r in rows],
+        headers={"X-Next-Cursor": str(next_cursor) if next_cursor else ""},
+    ) 
