@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from hashlib import sha256
+from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Response, status, Request, Query
 from jose import jwt
@@ -17,10 +18,11 @@ from app.models import (
     PolicyRevertRequest,
     PolicyDescriptionUpdate,
     MessageResponse,
+    PolicySummary,
 )
 from app.utils.database import insert_data, query_one, query_many, update_data
 from app.utils.dependencies import get_supabase_async, require_account_admin
-from app.utils.security_utils import get_active_private_jwk, verify_api_token
+from app.utils.security_utils import verify_api_token
 from app.utils.plans import enforce_bundle_poll, get_plan_limit, effective_plan
 import base64
 from app.utils.require_scope import require_scope
@@ -564,6 +566,47 @@ async def revert_policy(
     )
     
     return MessageResponse(message=f"Reverted to policy version {target_policy['version']}")
+
+# ---------------------------------------------------------------------------
+# Front-end helpers: list policies & fetch single bundle + metadata
+# ---------------------------------------------------------------------------
+
+
+@router.get("/list", response_model=list[PolicySummary])
+async def list_policies(
+    account_id: str = Depends(require_scope("policy.read")),
+    supabase=Depends(get_supabase_async),
+):
+    """Return **all** policies (draft + published) for the caller's account.
+
+    Front-end can client-side filter by `app_name` or `is_draft` if needed.
+    """
+
+    rows = await query_many(
+        supabase,
+        POLICY_TABLE,
+        match={"account_id": account_id},
+        order_by=("created_at", "desc"),
+        select_fields="id,app_name,version,description,active,is_draft,published_at,expires,revocation_time,is_revoked,bundle",
+    )
+    return [PolicySummary(**r) for r in rows]
+
+
+@router.get("/{policy_id}", response_model=PolicySummary)
+async def get_policy_detail(
+    policy_id: str,
+    account_id: str = Depends(require_scope("policy.read")),
+    supabase=Depends(get_supabase_async),
+):
+    row = await query_one(
+        supabase,
+        POLICY_TABLE,
+        match={"id": policy_id, "account_id": account_id},
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="policy_not_found")
+
+    return PolicySummary(**row)
 
 
 # ---------------------------------------------------------------------------

@@ -169,3 +169,17 @@ __all__: list[str] = list(_globals_update.keys())
 class PolicyDescriptionUpdate(BaseModel):
     """Payload for updating a policy description from the dashboard."""
     description: str = Field(..., max_length=1024) 
+
+
+class PolicySummary(BaseModel):
+    id: str
+    app_name: str
+    version: int
+    description: str | None = None
+    active: bool
+    is_draft: bool
+    published_at: datetime | None = None
+    expires: datetime | None = None
+    revocation_time: datetime | None = None
+    is_revoked: bool = False
+    bundle: dict | None = None
