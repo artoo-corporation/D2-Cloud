@@ -198,7 +198,7 @@ async def query_one(
         limit=1,
     )
     # Supabase Python client returns a .data attribute on the response object.
-    rows = getattr(resp, "data", None) or []
+    rows = getattr(resp, "data", resp)
     return rows[0] if rows else None
 
 
@@ -254,8 +254,8 @@ async def query_many(
     if limit:
         query = query.limit(limit)
 
-    # Await the execute() call
-    return await query.execute()
+    resp = await query.execute()
+    return getattr(resp, "data", resp)
 
 
 # ---------------------------------------------------------------------------
