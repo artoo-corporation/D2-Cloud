@@ -123,7 +123,11 @@ def create_app() -> FastAPI:  # noqa: C901
     )
     # Re-use existing JWKS router (/.well-known/jwks.json)
     from app.routers.jwks_routes import public_router as jwks_public_router, admin_router as jwks_admin_router
+    # Make JWKS reachable both at /public/.well-known/jwks.json and
+    # directly at /.well-known/jwks.json for clients that assume the
+    # standard location.
     public_app.include_router(jwks_public_router)
+    app.include_router(jwks_public_router)
 
     # Mount at /public (eg. /public/.well-known/jwks.json)
     app.mount("/public", public_app)

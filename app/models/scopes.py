@@ -12,6 +12,8 @@ class Scope(str, Enum):
     admin = "admin"
     key_upload = "key.upload"
     policy_publish = "policy.publish"
+    policy_revoke = "policy.revoke"
+    policy_revert = "policy.revert"
     metrics_read = "metrics.read"
     event_ingest = "event.ingest"
     dev = "dev"  # shorthand for read + policy.publish + key.upload

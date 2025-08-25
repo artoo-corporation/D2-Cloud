@@ -9,10 +9,10 @@ First-token behavior: The very first token for an account is forced to
 ["read"]. All subsequent tokens default to ["admin"] unless narrowed.
 """
 
-import secrets
 from uuid import uuid4
 from hashlib import sha256
 from datetime import datetime, timezone
+import secrets
 
 from fastapi import APIRouter, Depends, HTTPException, Path, status
 
@@ -26,7 +26,7 @@ from app.models.scopes import Scope
 from app.utils.dependencies import get_supabase_async, require_token_admin, require_actor_admin, Actor
 from app.utils.database import insert_data, query_data, update_data
 from app.utils.security_utils import hash_token, compute_token_lookup
-from app.utils.logger import logger
+
 API_TOKEN_TABLE = "api_tokens"
 TOKEN_PREFIX = "d2_"
 

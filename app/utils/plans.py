@@ -18,31 +18,36 @@ PLANS: Dict[str, Dict[str, Any]] = {
         "max_tools": 5,
         "min_poll": 300,
         "ingest_interval": 60,
-        "max_batch_bytes": 32 * 1024,  # 32 KiB
+        "max_batch_bytes": 32 * 1024,  # 32 KiB (events)
+        "max_bundle_bytes": int(0.5 * 1024 * 1024),  # 0.5 MiB
     },
     "essentials": { # $99
         "max_tools": 25,
         "min_poll": 60,
         "ingest_interval": 60,
         "max_batch_bytes": 128 * 1024,
+        "max_bundle_bytes": int(2 * 1024 * 1024),  # 2 MiB
     },
     "pro": { # $250
         "max_tools": 250,
         "min_poll": 30,
         "ingest_interval": 30,
         "max_batch_bytes": 512 * 1024,
+        "max_bundle_bytes": int(5 * 1024 * 1024),  # 5 MiB
     },
     "enterprise": { # $CUSTOM
         "max_tools": 1000,
-        "min_poll": 30,
+        "min_poll": 15,
         "ingest_interval": 10,
         "max_batch_bytes": 1024 * 1024,
+        "max_bundle_bytes": int(20 * 1024 * 1024),  # 20 MiB
     },
     "locked": {
         "max_tools": 0,
-        "min_poll": 300,
+        "min_poll": 100000,
         "ingest_interval": 60,  # disallow ingest
         "max_batch_bytes": 32 * 1024,
+        "max_bundle_bytes": int(0.5 * 1024 * 1024),
     },
 }
 

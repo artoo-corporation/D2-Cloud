@@ -44,7 +44,7 @@ class MessageResponse(BaseResponse):
     message: str = Field(..., example="OK")
 
 class PolicyBundleResponse(BaseModel):
-    jws: str
+    jws: Optional[str] = Field(None, description="Signed bundle (None when draft)")
     version: int
     etag: str
 
@@ -61,6 +61,7 @@ class PolicyVersionResponse(BaseModel):
     version: int = Field(..., description="Policy version number")
     active: bool = Field(..., description="Whether this version is currently active")
     published_at: datetime = Field(..., description="When this version was published")
+    expires: Optional[datetime] = Field(None, description="When this policy expires")
     revocation_time: Optional[datetime] = Field(None, description="When this version was revoked")
 
 class PolicyRevertRequest(BaseModel):
@@ -146,6 +147,9 @@ class TokenScopeError(BaseModel):
     """403 response for insufficient token scope."""
 
     error: str = Field("insufficient_scope", pattern="^insufficient_scope$")
+
+# Add new request model for app rename
+
 
 # ---------------------------------------------------------------------------
 # Re-export DB row models

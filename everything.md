@@ -119,10 +119,10 @@ All paths below are fully-qualified with the base URL `https://d2.artoo.love`.
 
 | Method | Path | Auth | Description |
 | ------ | ---- | ---- | ----------- |
-| GET | `https://d2.artoo.love/v1/accounts/me` | Bearer token | Returns plan info, quotas, and account metadata. |
-| POST | `https://d2.artoo.love/v1/accounts/{account_id}/tokens` | – (bootstrap) or Admin token | Creates new **API token**. If **no tokens exist** the call is unauthenticated and issues a `read`-scope token; otherwise requires an existing admin token and always issues an `admin`-scope token. |
-| GET | `https://d2.artoo.love/v1/accounts/{account_id}/tokens` | Admin | Lists tokens for current account. |
-| DELETE | `https://d2.artoo.love/v1/accounts/{account_id}/tokens/{token_id}` | Admin | Revokes token by ID (soft-delete). |
+| GET | `/v1/accounts/me` | Bearer token | Returns plan info, quotas, and account metadata. |
+| POST | `/v1/accounts/{account_id}/tokens` | Admin | Creates **long-lived opaque API key** (primary secret). |
+| GET | `/v1/accounts/{account_id}/tokens` | Admin | Lists keys. |
+| DELETE | `/v1/accounts/{account_id}/tokens/{token_id}` | Admin | Revokes key. |
 
 ### 5.2 Policy Service (`app/routers/policy_routes.py` – prefix `/v1/policy`)
 

@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import json
-import os
 from datetime import datetime, timezone
 from hashlib import sha256
-from typing import Dict, Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Response, status, Request, Query
 from jose import jwt
@@ -22,11 +20,14 @@ from app.models import (
 from app.utils.database import insert_data, query_one, query_many, update_data
 from app.utils.dependencies import get_supabase_async, require_account_admin
 from app.utils.security_utils import get_active_private_jwk, verify_api_token
-from app.utils.plans import enforce_bundle_poll
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+from app.utils.plans import enforce_bundle_poll, get_plan_limit, effective_plan
 import base64
 from app.utils.require_scope import require_scope
 from app.utils.logger import logger
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+from app.utils.policy_expiry import is_policy_expired, extract_and_sync_policy_expiry
+from app.utils.policy_validation import validate_d2_policy_bundle, get_policy_summary, extract_app_name
+from app.utils.security_utils import decrypt_private_jwk
 
 router = APIRouter(prefix="/v1/policy", tags=["policy"])
 
@@ -37,48 +38,100 @@ POLICY_TABLE = "policies"
 @router.get("/bundle", response_model=PolicyBundleResponse)
 async def get_policy_bundle(
     response: Response,
+    app_name: str = Query("default", description="App name to retrieve policy for"),
+    stage: str = Query("auto", description="Which bundle stage to fetch: published, draft, or auto"),
     account_id: str = Depends(require_scope("policy.read")),
     if_none_match: str | None = Header(None, alias="If-None-Match"),
     supabase=Depends(get_supabase_async),
 ):
-    # First try to get the active published policy
-    row = await query_one(
-        supabase,
-        POLICY_TABLE,
-        match={"account_id": account_id, "is_draft": False, "active": True},
-    )
-    if not row:
-        # Fallback to latest draft for preview purposes
+    # Stage handling
+    stage = stage.lower()
+
+    row = None
+
+    if stage == "published":
         row = await query_one(
             supabase,
             POLICY_TABLE,
-            match={"account_id": account_id, "is_draft": True},
+            match={"account_id": account_id, "app_name": app_name, "is_draft": False, "active": True},
+        )
+    elif stage == "draft":
+        row = await query_one(
+            supabase,
+            POLICY_TABLE,
+            match={"account_id": account_id, "app_name": app_name, "is_draft": True},
             order_by=("version", "desc"),
         )
+    else:  # auto – prefer published then draft
+        row = await query_one(
+            supabase,
+            POLICY_TABLE,
+            match={"account_id": account_id, "app_name": app_name, "is_draft": False, "active": True},
+        )
         if not row:
-            raise HTTPException(status_code=404, detail="No policy found for account")
+            row = await query_one(
+                supabase,
+                POLICY_TABLE,
+                match={"account_id": account_id, "app_name": app_name, "is_draft": True},
+                order_by=("version", "desc"),
+            )
+
+    if not row:
+        raise HTTPException(status_code=404, detail="No policy found for account")
 
     # 4️⃣  Revocation enforcement
     if row.get("revocation_time") and datetime.fromisoformat(row["revocation_time"]).astimezone(timezone.utc) < datetime.now(timezone.utc):
         raise HTTPException(status_code=410, detail="Policy revoked")
 
-    # 3️⃣  Basic plan / quota enforcement (bundle size)
+    # 5️⃣  Policy expiry enforcement and warnings
+    policy_expires = row.get("expires")
+    
+    if policy_expires:
+        # Convert string to datetime if needed
+        if isinstance(policy_expires, str):
+            policy_expires = datetime.fromisoformat(policy_expires).astimezone(timezone.utc)
+        
+        # Check if policy is expired (just log for monitoring)
+        if is_policy_expired(policy_expires):
+            logger.warning(f"Policy expired for account {account_id}: {policy_expires}")
+            # Expiry is automatically handled during upload/publish
+
+    # 3️⃣  Ensure we actually found a policy row (defence-in-depth – should already be guaranteed)
+    if not row or "jws" not in row:
+        raise HTTPException(status_code=404, detail="No policy found for account")
+
+    # 4️⃣  Basic plan / quota enforcement (bundle size)
     account = await query_one(supabase, "accounts", match={"id": account_id})
-    plan = (account or {}).get("plan", "free")
-    plan_limits_mb = {"free": 0.5, "starter": 2, "team": 5, "enterprise": 20}
-    size_limit = plan_limits_mb.get(plan, 0.5) * 1024 * 1024  # bytes
-    if len(row["jws"].encode()) > size_limit:
+    plan = effective_plan(account)
+    # Max bundle size by plan (bytes)
+    size_limit = get_plan_limit(plan, "max_bundle_bytes", int(0.5 * 1024 * 1024))
+
+    # For drafts there is no JWS yet – use raw bundle for size check / ETag
+    if row.get("jws"):
+        payload_bytes = row["jws"].encode()
+    else:
+        payload_bytes = json.dumps(row["bundle"], separators=(",", ":"), sort_keys=True).encode()
+
+    if len(payload_bytes) > size_limit:
         raise HTTPException(status_code=413, detail="Bundle exceeds plan size limit")
 
     # 3b️⃣  Server-side poll-interval enforcement (per-account bucket)
-    poll_seconds = int((account or {}).get("poll_seconds", 60))
+    # If the account has an explicit per-tenant poll_seconds override we honour the
+    # *smaller* of (override, plan default). This way upgrading plan immediately
+    # lowers the minimum poll window without requiring a manual DB update.
+    plan_min_poll = get_plan_limit(plan, "min_poll", 60)
+    acct_override = (account or {}).get("poll_seconds")
+    if acct_override is not None:
+        poll_seconds = min(int(acct_override), plan_min_poll)
+    else:
+        poll_seconds = plan_min_poll
     try:
         enforce_bundle_poll(account_id, poll_seconds)
     except HTTPException as exc:
         # Bubble up 429 untouched so FastAPI renders proper Retry-After header
         raise exc
 
-    etag = sha256(row["jws"].encode()).hexdigest()
+    etag = sha256(payload_bytes).hexdigest()
 
     # If-None-Match only applies to published bundles
     if not row.get("is_draft", False) and if_none_match:
@@ -91,6 +144,8 @@ async def get_policy_bundle(
     response.headers["ETag"] = f'"{etag}"'
     # Use per-account poll window if set, otherwise default by plan
     response.headers["X-D2-Poll-Seconds"] = str(poll_seconds)
+    
+    # Expiry is handled automatically during policy upload/publish
 
     return PolicyBundleResponse(jws=row["jws"], version=row["version"], etag=etag)
 
@@ -104,19 +159,35 @@ async def upload_policy_draft(
 ):
     logger.info(f"Draft upload for account {account_id}")
 
+    # Validate D2 policy bundle format
+    try:
+        is_valid, validation_errors = validate_d2_policy_bundle(draft.bundle, strict=False)
+        if not is_valid:
+            logger.warning(f"Policy validation warnings for account {account_id}: {validation_errors}")
+        
+        # Log policy summary for debugging
+        policy_summary = get_policy_summary(draft.bundle)
+        logger.info(f"Policy summary for account {account_id}: {policy_summary}")
+    except Exception as e:
+        logger.error(f"Policy validation error for account {account_id}: {e}")
+        # Continue anyway - validation is informational for now
+
     # Auto-generate next draft version
     # Check highest version across both drafts and published policies
+    # Extract app name first to determine which app's draft/published versions to check
+    temp_app_name = extract_app_name(draft.bundle)
+    
     latest_draft = await query_one(
         supabase,
         POLICY_TABLE,
-        match={"account_id": account_id, "is_draft": True},
+        match={"account_id": account_id, "app_name": temp_app_name, "is_draft": True},
         order_by=("version", "desc"),
     )
     
     latest_published = await query_one(
         supabase,
         POLICY_TABLE,
-        match={"account_id": account_id, "is_draft": False},
+        match={"account_id": account_id, "app_name": temp_app_name, "is_draft": False},
         order_by=("version", "desc"),
     )
     
@@ -125,26 +196,49 @@ async def upload_policy_draft(
     published_version = latest_published["version"] if latest_published else 0
     next_version = max(draft_version, published_version) + 1
     
-    # Delete any existing draft (we only keep one)
+    # Extract app name from bundle metadata
+    app_name = extract_app_name(draft.bundle)
+    logger.info(f"Extracted app name: {app_name} for account {account_id}")
+    
+    # Extract and sync expiry information from the policy bundle
+    # Auto-extend if expired
+    updated_bundle, policy_expiry = extract_and_sync_policy_expiry(draft.bundle)
+    logger.info(f"Final policy expiry after sync: {policy_expiry} for account {account_id}")
+    
+    # Convert datetime to ISO string for database storage
+    policy_expiry_str = policy_expiry.isoformat() if policy_expiry else None
+    
+    # Prepare update values with synchronized bundle
+    update_values = {
+        "bundle": updated_bundle,
+        "version": next_version,
+        "app_name": app_name,
+        "expires": policy_expiry_str,
+    }
+    
+    # Update existing draft or create new one
     if latest_draft:
         await update_data(
             supabase,
             POLICY_TABLE,
             keys={"id": latest_draft["id"]},
-            values={"bundle": draft.bundle, "version": next_version},
+            values=update_values,
         )
         logger.info(f"Updated existing draft to version {next_version} for account {account_id}")
     else:
         # Create new draft
+        insert_values = {
+            "account_id": account_id,
+            "version": next_version,
+            "bundle": updated_bundle,
+            "app_name": app_name,
+            "is_draft": True,
+            "expires": policy_expiry_str,
+        }
         await insert_data(
             supabase,
             POLICY_TABLE,
-            {
-                "account_id": account_id,
-                "version": next_version,
-                "bundle": draft.bundle,
-                "is_draft": True,
-            },
+            insert_values,
         )
         logger.info(f"Created new draft version {next_version} for account {account_id}")
     logger.info(f"Draft uploaded for account {account_id}")
@@ -169,9 +263,9 @@ async def upload_policy_draft(
 @router.post("/publish", response_model=PolicyPublishResponse)
 async def publish_policy(
     request: Request,
+    app_name: str = Query(..., description="App name being published"),
     x_d2_signature: str = Header(..., alias="X-D2-Signature"),
     x_d2_key_id: str = Header(..., alias="X-D2-Key-Id"),
-    if_none_match: str | None = Header(None, alias="If-None-Match"),
     if_match: str | None = Header(None, alias="If-Match"),
     account_id: str = Depends(require_scope("policy.publish")),
     authorization: str = Header(..., description="Bearer API token"),
@@ -184,7 +278,7 @@ async def publish_policy(
     latest_published = await query_one(
         supabase,
         POLICY_TABLE,
-        match={"account_id": account_id, "is_draft": False, "active": True},
+        match={"account_id": account_id, "app_name": app_name, "is_draft": False, "active": True},
     )
 
     logger.info(f"Latest published policy: {latest_published}")
@@ -192,20 +286,17 @@ async def publish_policy(
     if latest_published:
         current_etag = sha256(latest_published["jws"].encode()).hexdigest()
 
-        provided_etag = None
-        if if_match:
-            provided_etag = if_match.lstrip("W/").strip('"')
-        elif if_none_match:
-            provided_etag = if_none_match.lstrip("W/").strip('"')
+        provided_etag = if_match.lstrip("W/").strip('"') if if_match else None
 
         if provided_etag is None or provided_etag != current_etag:
             logger.error(f"ETag mismatch for account {account_id}: provided={provided_etag}, current={current_etag}")
             raise HTTPException(status_code=409, detail="etag_mismatch")
 
     else:
-        # First publish ever – still require header but allow "*"
-        if not (if_match or if_none_match):
-            logger.error(f"No ETag header provided for first publish, account {account_id}")
+        # First publish for this app – allow If-Match: * or no header
+        provided = (if_match or "*").strip()
+        if provided not in ("*", "W/*", "\"*\""):
+            logger.error("First publish requires If-Match: '*' (app %s)", app_name)
             raise HTTPException(status_code=409, detail="etag_mismatch")
 
     # ------------------------------------------------------------------
@@ -214,7 +305,10 @@ async def publish_policy(
 
 
     draft_row = await query_one(
-        supabase, POLICY_TABLE, match={"account_id": account_id, "is_draft": True}, order_by=("version", "desc")
+        supabase,
+        POLICY_TABLE,
+        match={"account_id": account_id, "app_name": app_name, "is_draft": True},
+        order_by=("version", "desc"),
     )
     if not draft_row:
         logger.error(f"No draft found for account {account_id}")
@@ -231,6 +325,12 @@ async def publish_policy(
 
     logger.info(f"Latest version: {latest_version}")
     new_version = latest_version + 1
+    # ------------------------------------------------------------------
+    # Sync expiry field inside bundle (auto-extend if needed)
+    # ------------------------------------------------------------------
+
+    updated_bundle, policy_expiry = extract_and_sync_policy_expiry(draft_row["bundle"])
+
     # ------------------------------------------------------------------
     # Signature verification (Ed25519)
     # ------------------------------------------------------------------
@@ -278,16 +378,37 @@ async def publish_policy(
         raise HTTPException(status_code=400, detail="invalid_signature")
 
     # ------------------------------------------------------------------
-    private_jwk = await get_active_private_jwk(account_id, supabase)
+    # Fetch active RSA key-pair for this tenant
+    rsa_row = await query_one(
+        supabase,
+        "jwks_keys",
+        match={"account_id": account_id},
+        order_by=("created_at", "desc"),
+    )
+    if not rsa_row:
+        logger.error("Signing key not found for account %s", account_id)
+        raise HTTPException(status_code=500, detail="signing_key_not_found")
 
-    jws = jwt.encode(draft_row["bundle"], private_jwk, algorithm=JWT_ALGORITHM)
+    rsa_kid = rsa_row["kid"]
+    private_jwk = decrypt_private_jwk(rsa_row["private_jwk"])
+
+    # Sign the updated bundle with RSA key and correct kid
+    jws = jwt.encode(
+        updated_bundle,
+        private_jwk,
+        algorithm=JWT_ALGORITHM,
+        headers={"kid": rsa_kid},
+    )
+    
+    # Convert datetime to ISO string for database storage
+    policy_expiry_str = policy_expiry.isoformat() if policy_expiry else None
 
     # First, deactivate any currently active policy for this account
     if latest_published:
         await update_data(
             supabase,
             POLICY_TABLE,
-            keys={"account_id": account_id, "is_draft": False, "active": True},
+            keys={"account_id": account_id, "app_name": app_name, "is_draft": False, "active": True},
             values={"active": False},
         )
 
@@ -297,11 +418,14 @@ async def publish_policy(
         POLICY_TABLE,
         keys={"id": draft_row["id"]},
         values={
+            "bundle": updated_bundle,
             "jws": jws,
             "is_draft": False,
             "published_at": datetime.now(timezone.utc),
             "version": new_version,
             "active": True,
+            "expires": policy_expiry_str,
+            "app_name": app_name,
         },
     )
 
@@ -313,7 +437,13 @@ async def publish_policy(
 
     # Determine poll-seconds (account-level override or default by plan)
     account = await query_one(supabase, "accounts", match={"id": account_id})
-    poll_seconds = int((account or {}).get("poll_seconds", 60))
+    plan_name = effective_plan(account)
+    plan_min_poll = get_plan_limit(plan_name, "min_poll", 60)
+    acct_override = (account or {}).get("poll_seconds")
+    if acct_override is not None:
+        poll_seconds = min(int(acct_override), plan_min_poll)
+    else:
+        poll_seconds = plan_min_poll
 
     from fastapi.responses import JSONResponse
 
@@ -344,22 +474,27 @@ async def publish_policy(
 
 @router.post("/revoke", response_model=MessageResponse, status_code=status.HTTP_202_ACCEPTED)
 async def revoke_policy(
-    account_id: str = Depends(require_account_admin),
+    app_name: str = Query(..., description="App name to revoke policy for"),
+    account_id: str = Depends(require_scope("policy.revoke")),
     supabase=Depends(get_supabase_async),
 ):
-    latest = await query_one(
-        supabase, POLICY_TABLE, match={"account_id": account_id}, order_by=("version", "desc")
+    logger.info(f"Revoking policy for app '{app_name}' in account {account_id}")
+    # Find the currently active published policy for this app
+    active_policy = await query_one(
+        supabase, POLICY_TABLE, 
+        match={"account_id": account_id, "app_name": app_name, "is_draft": False, "active": True}
     )
-    if not latest:
-        raise HTTPException(status_code=404, detail="No policy found to revoke")
+    if not active_policy:
+        raise HTTPException(status_code=404, detail=f"No active policy found to revoke for app '{app_name}'")
 
     await update_data(
         supabase,
         POLICY_TABLE,
-        keys={"id": latest["id"]},
+        keys={"id": active_policy["id"]},
         values={"revocation_time": datetime.now(timezone.utc)},
     )
-    return MessageResponse(message="Policy revoked")
+    logger.info(f"Revoked active policy (version {active_policy['version']}) for app '{app_name}' in account {account_id}")
+    return MessageResponse(message=f"Active policy revoked for app '{app_name}'")
 
 
 @router.get("/versions", response_model=list[PolicyVersionResponse])
@@ -373,7 +508,7 @@ async def list_policy_versions(
         POLICY_TABLE,
         match={"account_id": account_id, "is_draft": False},
         order_by=("version", "desc"),
-        select_fields="id,version,active,published_at,revocation_time",
+        select_fields="id,version,active,published_at,expires,revocation_time",
     )
     
     return [PolicyVersionResponse(**row) for row in rows]
@@ -382,7 +517,7 @@ async def list_policy_versions(
 @router.post("/revert", response_model=MessageResponse)
 async def revert_policy(
     request: PolicyRevertRequest,
-    account_id: str = Depends(require_account_admin),
+    account_id: str = Depends(require_scope("policy.revert")),
     supabase=Depends(get_supabase_async),
 ):
     """Revert to a specific policy version by making it active."""
