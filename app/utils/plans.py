@@ -37,7 +37,7 @@ PLANS: Dict[str, Dict[str, Any]] = {
     },
     "enterprise": { # $CUSTOM
         "max_tools": 1000,
-        "min_poll": 15,
+        "min_poll": 0,
         "ingest_interval": 10,
         "max_batch_bytes": 1024 * 1024,
         "max_bundle_bytes": int(20 * 1024 * 1024),  # 20 MiB

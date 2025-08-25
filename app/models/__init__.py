@@ -164,3 +164,8 @@ globals().update(_globals_update)
 
 # Build __all__
 __all__: list[str] = list(_globals_update.keys()) 
+
+
+class PolicyDescriptionUpdate(BaseModel):
+    """Payload for updating a policy description from the dashboard."""
+    description: str = Field(..., max_length=1024) 

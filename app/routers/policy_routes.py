@@ -15,6 +15,7 @@ from app.models import (
     PolicyPublishResponse,
     PolicyVersionResponse,
     PolicyRevertRequest,
+    PolicyDescriptionUpdate,
     MessageResponse,
 )
 from app.utils.database import insert_data, query_one, query_many, update_data
@@ -563,3 +564,40 @@ async def revert_policy(
     )
     
     return MessageResponse(message=f"Reverted to policy version {target_policy['version']}")
+
+
+# ---------------------------------------------------------------------------
+# Update description
+# ---------------------------------------------------------------------------
+
+
+@router.patch("/{policy_id}/description", response_model=MessageResponse)
+async def update_policy_description(
+    policy_id: str,
+    payload: PolicyDescriptionUpdate,
+    account_id: str = Depends(require_scope("policy.publish")),
+    supabase=Depends(get_supabase_async),
+):
+    """Update the free-text description of a draft or published policy.
+
+    Only the owner account can update; requires `policy.publish` or higher
+    scope (dev/server/admin roles).
+    """
+
+    # Ensure policy belongs to caller
+    policy_row = await query_one(
+        supabase,
+        POLICY_TABLE,
+        match={"id": policy_id, "account_id": account_id},
+    )
+    if not policy_row:
+        raise HTTPException(status_code=404, detail="policy_not_found")
+
+    await update_data(
+        supabase,
+        POLICY_TABLE,
+        keys={"id": policy_id},
+        values={"description": payload.description},
+    )
+
+    return MessageResponse(message="description_updated")
