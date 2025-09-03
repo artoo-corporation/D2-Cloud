@@ -135,11 +135,15 @@ async def require_actor_admin(
     # Try Supabase admin JWT first
     try:
         account_id = await verify_supabase_jwt(token, admin_only=True)
-        return Actor(account_id=account_id, user_id=account_id)
+        # Extract the user_id from the token for proper attribution
+        from jose import jwt
+        decoded = jwt.get_unverified_claims(token)
+        user_id = decoded.get("sub")  # Supabase puts user ID in 'sub' claim
+        return Actor(account_id=account_id, user_id=user_id)
     except HTTPException as exc:
         if exc.status_code not in {401, 403}:
             raise
 
     # Fallback to D2 admin token with details
     details = await verify_api_token(token, supabase, return_details=True)
-    return Actor(account_id=details["account_id"], token_id=details.get("token_id"))
+    return Actor(account_id=details["account_id"], token_id=details.get("token_id"), user_id=details.get("user_id"))

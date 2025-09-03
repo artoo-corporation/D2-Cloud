@@ -15,11 +15,45 @@ from datetime import datetime
 from enum import Enum
 from importlib import import_module
 from typing import Any, Dict, List, Optional
+from dataclasses import dataclass
 
 from pydantic import BaseModel, Field
 
 # External enums -------------------------------------------------------------
 from app.models.scopes import Scope
+
+# ---------------------------------------------------------------------------
+# Authentication Models
+# ---------------------------------------------------------------------------
+
+@dataclass
+class AuthContext:
+    """Authentication context from validated API token.
+    
+    This replaces the old pattern of storing auth data in request.state
+    and makes authentication data explicit and type-safe.
+    """
+    account_id: str
+    scopes: list[str]
+    user_id: str | None = None
+    token_id: str | None = None
+    app_name: str | None = None
+    
+    def has_scope(self, scope: str) -> bool:
+        """Check if the token has a specific scope."""
+        return scope in self.scopes or "admin" in self.scopes
+    
+    def has_any_scope(self, *scopes: str) -> bool:
+        """Check if the token has any of the given scopes."""
+        return any(self.has_scope(scope) for scope in scopes)
+    
+    def is_admin(self) -> bool:
+        """Check if this is an admin token."""
+        return "admin" in self.scopes
+    
+    def is_dev(self) -> bool:
+        """Check if this is a dev token."""
+        return "dev" in self.scopes
 
 # ---------------------------------------------------------------------------
 # Enums – shareable across request / DB models
@@ -30,6 +64,59 @@ class PlanTier(str, Enum):
     essentials = "essentials"
     pro = "pro"
     enterprise = "enterprise"
+
+class AuditAction(str, Enum):
+    """Standardized audit action types for comprehensive logging."""
+    # Token operations
+    token_create = "token.create"
+    token_revoke = "token.revoke"
+    token_rotate = "token.rotate"
+    
+    # Policy operations
+    policy_draft = "policy.draft"
+    policy_publish = "policy.publish"
+    policy_update = "policy.update"
+    policy_revert = "policy.revert"
+    policy_revoke = "policy.revoke"
+    
+    # Key operations
+    key_upload = "key.upload"
+    key_revoke = "key.revoke"
+    
+    # SDK telemetry operations
+    tool_invocation = "tool.invocation"
+    auth_decision = "auth.decision"
+    policy_poll = "policy.poll"
+    policy_load = "policy.load"
+    jwks_fetch = "jwks.fetch"
+    context_leak = "context.leak"
+    missing_policy = "missing.policy"
+    sync_in_async_denied = "sync_in_async.denied"
+    
+    # Threading security operations (NEW 2025-08-28)
+    context_submission = "context.submission"
+    context_missing_actor = "context.missing_actor"
+    context_leak_detected = "context.leak_detected"
+    context_actor_override = "context.actor_override"
+    thread_entrypoint = "thread.entrypoint"
+    context_no_context_error = "context.no_context_error"
+    
+    # Invitation operations
+    invitation_create = "invitation.create"
+    invitation_accept = "invitation.accept"
+    invitation_cancel = "invitation.cancel"
+
+class AuditStatus(str, Enum):
+    """Status of audited operations."""
+    success = "success"
+    failure = "failure"
+    denied = "denied"
+    allowed = "allowed"
+    
+    # Threading security statuses (NEW 2025-08-28)
+    context_violation = "context_violation"  # Missing actor, context leaks
+    security_override = "security_override"  # Actor overrides, confused deputy
+    context_hygiene = "context_hygiene"     # Context cleanup issues
 
 # ---------------------------------------------------------------------------
 # API  Pydantic models (previously in app.schemas)
@@ -47,6 +134,7 @@ class PolicyBundleResponse(BaseModel):
     jws: Optional[str] = Field(None, description="Signed bundle (None when draft)")
     version: int
     etag: str
+    bundle: Optional[Dict[str, Any]] = Field(None, description="Raw bundle content (included for drafts)")
 
 class PolicyDraft(BaseModel):
     bundle: Dict[str, Any] = Field(..., description="Raw policy document")
@@ -63,6 +151,10 @@ class PolicyVersionResponse(BaseModel):
     published_at: datetime = Field(..., description="When this version was published")
     expires: Optional[datetime] = Field(None, description="When this policy expires")
     revocation_time: Optional[datetime] = Field(None, description="When this version was revoked")
+    app_name: str = Field(..., description="App name for this policy")
+    description: Optional[str] = Field(None, description="Policy description")
+    bundle: Optional[Dict[str, Any]] = Field(None, description="Policy bundle content (for comparison)")
+    published_by: Optional[str] = Field(None, description="Name of user who published this version")
 
 class PolicyRevertRequest(BaseModel):
     policy_id: str = Field(..., description="ID of the policy version to revert to")
@@ -90,6 +182,8 @@ class TokenCreateRequest(BaseModel):
         default_factory=lambda: [Scope.read],
         description="Token capability scopes",
     )
+    app_name: Optional[str] = Field(None, description="Associate token with specific app")
+    assigned_user_id: Optional[str] = Field(None, description="Assign token to specific user (defaults to current user)")
 
 class TokenCreateResponse(BaseModel):
     token_id: str
@@ -136,6 +230,8 @@ class PublicKeyResponse(BaseModel):
     public_key: str = Field(..., description="Base64-encoded Ed25519 public key")
     created_at: datetime
     revoked_at: Optional[datetime]
+    user_id: Optional[str] = Field(None, description="User who uploaded this key")
+    uploaded_by_name: Optional[str] = Field(None, description="Display name of user who uploaded this key")
     
 
 class AccountCreateResponse(BaseModel):
@@ -168,7 +264,23 @@ __all__: list[str] = list(_globals_update.keys())
 
 class PolicyDescriptionUpdate(BaseModel):
     """Payload for updating a policy description from the dashboard."""
-    description: str = Field(..., max_length=1024) 
+    description: str = Field(..., max_length=1024)
+
+class PolicyBundleUpdate(BaseModel):
+    """Payload for updating a policy bundle content from the editor."""
+    bundle: Dict[str, Any] = Field(..., description="Updated policy bundle content")
+    description: Optional[str] = Field(None, max_length=1024, description="Optional description update")
+
+class PolicyValidationRequest(BaseModel):
+    """Request for validating a policy bundle in the editor."""
+    bundle: Dict[str, Any] = Field(..., description="Policy bundle to validate")
+
+class PolicyValidationResponse(BaseModel):
+    """Response for policy validation with detailed feedback."""
+    valid: bool = Field(..., description="Whether the policy is valid")
+    errors: List[str] = Field(default_factory=list, description="Validation error messages")
+    warnings: List[str] = Field(default_factory=list, description="Validation warnings")
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="Extracted metadata from bundle") 
 
 
 class PolicySummary(BaseModel):

@@ -21,7 +21,7 @@ router = APIRouter(prefix="/v1/accounts", tags=["accounts"])
 import os  # placed here to avoid polluting top-matter
 from fastapi import Header, HTTPException
 
-from app.models import MeResponse
+from app.models import AuthContext, MeResponse
 from app.utils.plans import effective_plan, get_plan_limit
 from app.utils.database import query_one
 from app.utils.require_scope import require_scope
@@ -29,12 +29,12 @@ from app.utils.require_scope import require_scope
 
 @router.get("/me", response_model=MeResponse)
 async def get_me(
-    account_id: str = Depends(require_scope("policy.read")),
+    auth: AuthContext = Depends(require_scope("policy.read")),
     supabase=Depends(get_supabase_async),
 ):
     """Return plan, quotas and misc account metadata for the caller."""
 
-    account = await query_one(supabase, "accounts", match={"id": account_id})
+    account = await query_one(supabase, "accounts", match={"id": auth.account_id})
     if not account:
         raise HTTPException(status_code=404, detail="Account not found")
 

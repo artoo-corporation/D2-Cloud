@@ -208,6 +208,7 @@ async def verify_api_token(
             "scopes": scopes,
             "token_id": row.get("token_id"),
             "user_id": row.get("created_by_user_id"),
+            "app_name": row.get("app_name"),
         }
 
     return row["account_id"]

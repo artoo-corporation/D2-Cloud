@@ -1,0 +1,318 @@
+"""Invitation management routes for multi-tenant accounts."""
+
+from __future__ import annotations
+
+import secrets
+from datetime import datetime, timezone, timedelta
+from uuid import uuid4
+
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
+
+from app.models import AuditAction, AuditStatus, MessageResponse
+from app.models.invitations import (
+    InvitationCreateRequest,
+    InvitationResponse, 
+    InvitationAcceptRequest,
+    InvitationListResponse,
+    PendingInvitationInfo,
+    InvitationRole,
+)
+from app.utils.audit import log_audit_event
+from app.utils.dependencies import get_supabase_async, require_actor_admin, Actor
+from app.utils.database import insert_data, query_data, query_one, update_data
+
+router = APIRouter(prefix="/v1/accounts/{account_id}/invitations", tags=["invitations"])
+
+
+async def _generate_invitation_token() -> str:
+    """Generate a secure random token for invitations."""
+    return f"inv_{secrets.token_urlsafe(32)}"
+
+
+@router.post(
+    "",
+    response_model=MessageResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_invitation(
+    account_id: str = Path(..., description="Account ID"),
+    request: InvitationCreateRequest = ...,
+    actor: Actor = Depends(require_actor_admin),
+    supabase=Depends(get_supabase_async),
+):
+    """Create a new invitation to join the account.
+    
+    Only account admins can invite new users.
+    Invited users will receive an email with a secure link to accept.
+    """
+    # Enforce account access and admin role
+    if actor.account_id != account_id:
+        raise HTTPException(status_code=403, detail="account_mismatch")
+    if actor.user_id is None:
+        raise HTTPException(status_code=403, detail="supabase_session_required")
+    
+    # Check if user already exists in the account
+    existing_user = await query_one(
+        supabase,
+        "users",
+        match={"account_id": account_id, "email": request.email}
+    )
+    if existing_user:
+        raise HTTPException(status_code=409, detail="user_already_in_account")
+    
+    # Check if there's already a pending invitation
+    existing_invitation = await query_one(
+        supabase,
+        "invitations", 
+        match={"account_id": account_id, "email": request.email, "accepted_at": None}
+    )
+    if existing_invitation:
+        raise HTTPException(status_code=409, detail="invitation_already_exists")
+    
+    # Generate secure invitation token
+    invitation_token = await _generate_invitation_token()
+    invitation_id = str(uuid4())
+    expires_at = datetime.now(timezone.utc) + timedelta(days=7)
+    
+    # Create invitation
+    await insert_data(
+        supabase,
+        "invitations",
+        {
+            "id": invitation_id,
+            "account_id": account_id,
+            "email": request.email,
+            "role": request.role.value,
+            "invited_by_user_id": actor.user_id,
+            "invitation_token": invitation_token,
+            "expires_at": expires_at.isoformat(),
+        }
+    )
+    
+    # Audit log the invitation
+    await log_audit_event(
+        supabase,
+        action=AuditAction.invitation_create,
+        actor_id=account_id,
+        status=AuditStatus.success,
+        user_id=actor.user_id,
+        metadata={"invited_email": request.email, "role": request.role.value}
+    )
+    
+    # TODO: Send invitation email with token
+    # This would integrate with your email service (SendGrid, etc.)
+    
+    return MessageResponse(message=f"invitation_sent_to_{request.email}")
+
+
+@router.get("", response_model=InvitationListResponse)
+async def list_invitations(
+    account_id: str = Path(..., description="Account ID"),
+    include_accepted: bool = Query(False, description="Include accepted invitations"),
+    actor: Actor = Depends(require_actor_admin),
+    supabase=Depends(get_supabase_async),
+):
+    """List all invitations for the account."""
+    # Enforce account access
+    if actor.account_id != account_id:
+        raise HTTPException(status_code=403, detail="account_mismatch")
+    
+    # Build query filters
+    filters = {"account_id": account_id}
+    if not include_accepted:
+        filters["accepted_at"] = None
+    
+    # Query invitations
+    resp = await query_data(
+        supabase,
+        "invitations",
+        filters=filters,
+        select_fields="id,email,role,invited_by_user_id,expires_at,accepted_at,created_at"
+    )
+    
+    invitations_data = getattr(resp, "data", []) or []
+    
+    # Format response
+    invitations = [
+        InvitationResponse(
+            id=inv["id"],
+            email=inv["email"],
+            role=inv["role"],
+            invited_by_user_id=inv["invited_by_user_id"],
+            expires_at=inv["expires_at"],
+            accepted_at=inv.get("accepted_at"),
+            created_at=inv["created_at"]
+        )
+        for inv in invitations_data
+    ]
+    
+    return InvitationListResponse(invitations=invitations)
+
+
+@router.delete("/{invitation_id}")
+async def cancel_invitation(
+    account_id: str = Path(..., description="Account ID"),
+    invitation_id: str = Path(..., description="Invitation ID to cancel"),
+    actor: Actor = Depends(require_actor_admin),
+    supabase=Depends(get_supabase_async),
+):
+    """Cancel a pending invitation."""
+    # Enforce account access
+    if actor.account_id != account_id:
+        raise HTTPException(status_code=403, detail="account_mismatch")
+    
+    # Find invitation
+    invitation = await query_one(
+        supabase,
+        "invitations",
+        match={"id": invitation_id, "account_id": account_id}
+    )
+    if not invitation:
+        raise HTTPException(status_code=404, detail="invitation_not_found")
+    
+    if invitation.get("accepted_at"):
+        raise HTTPException(status_code=400, detail="invitation_already_accepted")
+    
+    # Delete invitation
+    await supabase.table("invitations").delete().eq("id", invitation_id).execute()
+    
+    return MessageResponse(message="invitation_cancelled")
+
+
+# Public endpoint for invitation acceptance (no auth required)
+invitation_public_router = APIRouter(prefix="/v1/invitations", tags=["invitations"])
+
+@invitation_public_router.get("/{invitation_token}")
+async def get_invitation_info(
+    invitation_token: str = Path(..., description="Invitation token from email"),
+    supabase=Depends(get_supabase_async),
+):
+    """Get information about a pending invitation (for the accept page)."""
+    # Find invitation by token
+    invitation = await query_one(
+        supabase,
+        "invitations",
+        match={"invitation_token": invitation_token}
+    )
+    
+    if not invitation:
+        raise HTTPException(status_code=404, detail="invitation_not_found")
+    
+    # Check if expired
+    expires_at = datetime.fromisoformat(invitation["expires_at"].replace("Z", "+00:00"))
+    if datetime.now(timezone.utc) > expires_at:
+        raise HTTPException(status_code=410, detail="invitation_expired")
+    
+    # Check if already accepted
+    if invitation.get("accepted_at"):
+        raise HTTPException(status_code=409, detail="invitation_already_accepted")
+    
+    # Get account info
+    account = await query_one(
+        supabase,
+        "accounts",
+        match={"id": invitation["account_id"]}
+    )
+    
+    # Get inviter info  
+    inviter = await query_one(
+        supabase,
+        "users",
+        match={"user_id": invitation["invited_by_user_id"]}
+    )
+    
+    return PendingInvitationInfo(
+        account_name=account.get("name", "Unknown Account"),
+        invited_by_name=inviter.get("display_name") or inviter.get("full_name") or "Unknown User",
+        role=invitation["role"],
+        expires_at=expires_at
+    )
+
+
+@invitation_public_router.post("/accept")
+async def accept_invitation(
+    request: InvitationAcceptRequest,
+    actor: Actor = Depends(require_actor_admin),  # User must be signed in
+    supabase=Depends(get_supabase_async),
+):
+    """Accept an invitation and join the account.
+    
+    User must be authenticated with Supabase (just signed up/in).
+    """
+    if actor.user_id is None:
+        raise HTTPException(status_code=403, detail="supabase_session_required")
+    
+    # Find invitation
+    invitation = await query_one(
+        supabase,
+        "invitations",
+        match={"invitation_token": request.invitation_token}
+    )
+    
+    if not invitation:
+        raise HTTPException(status_code=404, detail="invitation_not_found")
+    
+    # Validate invitation
+    expires_at = datetime.fromisoformat(invitation["expires_at"].replace("Z", "+00:00"))
+    if datetime.now(timezone.utc) > expires_at:
+        raise HTTPException(status_code=410, detail="invitation_expired")
+    
+    if invitation.get("accepted_at"):
+        raise HTTPException(status_code=409, detail="invitation_already_accepted")
+    
+    # Check if user is already in some account
+    existing_user = await query_one(
+        supabase,
+        "users",
+        match={"user_id": actor.user_id}
+    )
+    
+    if existing_user:
+        raise HTTPException(status_code=409, detail="user_already_has_account")
+    
+    # Get user info from Supabase Auth
+    user_response = await supabase.auth.get_user()
+    user = getattr(user_response, "user", None)
+    if not user:
+        raise HTTPException(status_code=401, detail="invalid_session")
+    
+    user_email = getattr(user, "email", "").lower()
+    if user_email != invitation["email"].lower():
+        raise HTTPException(status_code=400, detail="email_mismatch")
+    
+    # Add user to the account
+    await insert_data(
+        supabase,
+        "users",
+        {
+            "user_id": actor.user_id,
+            "account_id": invitation["account_id"],
+            "email": user_email,
+            "role": invitation["role"],
+            "display_name": getattr(user, "user_metadata", {}).get("name", user_email.split("@")[0]),
+            "full_name": getattr(user, "user_metadata", {}).get("full_name"),
+        }
+    )
+    
+    # Mark invitation as accepted
+    await update_data(
+        supabase,
+        "invitations",
+        {"id": invitation["id"]},
+        {
+            "accepted_at": datetime.now(timezone.utc).isoformat(),
+            "accepted_by_user_id": actor.user_id
+        }
+    )
+    
+    # Audit log acceptance
+    await log_audit_event(
+        supabase,
+        action=AuditAction.invitation_accept,
+        actor_id=invitation["account_id"],
+        status=AuditStatus.success,
+        user_id=actor.user_id,
+        metadata={"email": user_email, "role": invitation["role"]}
+    )
+    
+    return MessageResponse(message="invitation_accepted")

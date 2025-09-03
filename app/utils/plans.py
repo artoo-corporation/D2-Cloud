@@ -37,7 +37,7 @@ PLANS: Dict[str, Dict[str, Any]] = {
     },
     "enterprise": { # $CUSTOM
         "max_tools": 1000,
-        "min_poll": 0,
+        "min_poll": 10,
         "ingest_interval": 10,
         "max_batch_bytes": 1024 * 1024,
         "max_bundle_bytes": int(20 * 1024 * 1024),  # 20 MiB
@@ -104,11 +104,22 @@ def enforce_event_limits(account_id: str, plan: str, payload_size: int) -> None:
     _last_events_ts[account_id] = now
 
 
-def enforce_bundle_poll(account_id: str, poll_seconds: int) -> None:
-    """Server-side throttle for policy bundle fetches."""
+def enforce_bundle_poll(account_id: str, poll_seconds: int, token_scopes: list[str] | None = None) -> None:
+    """Server-side throttle for policy bundle fetches.
+    
+    Developer-friendly polling:
+    - Dev tokens (scope='dev'): No polling restrictions for local development
+    - Server tokens (scope='server'): Full polling restrictions apply
+    - Admin tokens: No polling restrictions (admin privilege)
+    """
 
     from fastapi import HTTPException, status  # local import
     import time
+
+    # Skip polling restrictions for dev and admin tokens
+    if token_scopes:
+        if "dev" in token_scopes or "admin" in token_scopes:
+            return  # No restrictions for developers and admins
 
     now = time.time()
     last = _last_bundle_poll_ts.get(account_id, 0.0)

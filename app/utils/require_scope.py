@@ -19,6 +19,7 @@ import os
 
 from fastapi import Depends, Header, HTTPException, Request, status
 
+from app.models import AuthContext
 from app.utils.dependencies import get_supabase_async
 from app.utils.security_utils import verify_api_token
 from app import APP_ENV
@@ -37,16 +38,20 @@ def require_scope(*expected_scopes: str):  # noqa: D401 – factory function
         request: Request,
         authorization: str | None = Header(None),
         supabase=Depends(get_supabase_async),
-    ) -> str:
-        """Ensure token has the required scopes and return account_id."""
+    ) -> AuthContext:
+        """Ensure token has the required scopes and return AuthContext."""
 
         # Development bypass: no header required in APP_ENV=development
         if authorization is None and APP_ENV == "development":
             account_id = _dev_account_id()
             # Grant broad scopes so expected ⊆ effective_scopes holds
-            request.state.account_id = account_id  # type: ignore[attr-defined]
-            request.state.scopes = ["admin"]      # type: ignore[attr-defined]
-            return account_id
+            request.state.account_id = account_id  # type: ignore[attr-defined] - Keep for backward compatibility
+            request.state.scopes = ["admin"]      # type: ignore[attr-defined] - Keep for backward compatibility
+            return AuthContext(
+                account_id=account_id,
+                scopes=["admin"],
+                user_id=account_id,  # In dev mode, user_id = account_id
+            )
 
         token = (authorization or "").split(" ")[-1]
 
@@ -58,14 +63,18 @@ def require_scope(*expected_scopes: str):  # noqa: D401 – factory function
             token,
             supabase,
             admin_only=False,
-            return_scopes=True,
+            return_details=True,
         )
 
         if inspect.isawaitable(result):
             result = await result
 
-        # Result can be either (account_id, scopes) tuple or bare account_id
-        if isinstance(result, tuple):
+        # Result can be either details dict, (account_id, scopes) tuple, or bare account_id
+        if isinstance(result, dict):
+            account_id = result["account_id"]
+            scopes = result.get("scopes", [])
+            request.state.app_name = result.get("app_name")  # Store app_name from token
+        elif isinstance(result, tuple):
             account_id, scopes = result
         else:
             account_id, scopes = result, ["admin"]  # Legacy path – full privileges
@@ -85,11 +94,20 @@ def require_scope(*expected_scopes: str):  # noqa: D401 – factory function
                 detail="insufficient_scope",
             )
 
-        # Store helpful context for downstream handlers / middleware
+        # Store context for backward compatibility with existing code
         request.state.account_id = account_id  # type: ignore[attr-defined]
         request.state.scopes = scopes          # type: ignore[attr-defined]
+        request.state.token_id = result.get("token_id") if isinstance(result, dict) else None  # type: ignore[attr-defined]
+        request.state.user_id = result.get("user_id") if isinstance(result, dict) else None    # type: ignore[attr-defined]
+        request.state.app_name = result.get("app_name") if isinstance(result, dict) else None  # type: ignore[attr-defined]
 
-        return account_id
+        return AuthContext(
+            account_id=account_id,
+            scopes=scopes,
+            user_id=result.get("user_id") if isinstance(result, dict) else None,
+            token_id=result.get("token_id") if isinstance(result, dict) else None,
+            app_name=result.get("app_name") if isinstance(result, dict) else None,
+        )
 
     return _checker
 
@@ -103,13 +121,17 @@ def require_scope_strict(*expected_scopes: str):  # noqa: D401 – factory funct
         request: Request,
         authorization: str | None = Header(None),
         supabase=Depends(get_supabase_async),
-    ) -> str:
+    ) -> AuthContext:
         # Development bypass
         if authorization is None and APP_ENV == "development":
             account_id = _dev_account_id()
             request.state.account_id = account_id  # type: ignore[attr-defined]
             request.state.scopes = []              # type: ignore[attr-defined]
-            return account_id
+            return AuthContext(
+                account_id=account_id,
+                scopes=[],
+                user_id=account_id,
+            )
 
         token = (authorization or "").split(" ")[-1]
 
@@ -117,13 +139,17 @@ def require_scope_strict(*expected_scopes: str):  # noqa: D401 – factory funct
             token,
             supabase,
             admin_only=False,
-            return_scopes=True,
+            return_details=True,
         )
 
         if inspect.isawaitable(result):
             result = await result
 
-        if isinstance(result, tuple):
+        if isinstance(result, dict):
+            account_id = result["account_id"]
+            scopes = result.get("scopes", [])
+            request.state.app_name = result.get("app_name")  # Store app_name from token
+        elif isinstance(result, tuple):
             account_id, scopes = result
         else:
             account_id, scopes = result, []  # strict: no implicit privileges
@@ -142,6 +168,16 @@ def require_scope_strict(*expected_scopes: str):  # noqa: D401 – factory funct
 
         request.state.account_id = account_id  # type: ignore[attr-defined]
         request.state.scopes = scopes          # type: ignore[attr-defined]
-        return account_id
+        request.state.token_id = result.get("token_id") if isinstance(result, dict) else None  # type: ignore[attr-defined]
+        request.state.user_id = result.get("user_id") if isinstance(result, dict) else None    # type: ignore[attr-defined]
+        request.state.app_name = result.get("app_name") if isinstance(result, dict) else None  # type: ignore[attr-defined]
+        
+        return AuthContext(
+            account_id=account_id,
+            scopes=scopes,
+            user_id=result.get("user_id") if isinstance(result, dict) else None,
+            token_id=result.get("token_id") if isinstance(result, dict) else None,
+            app_name=result.get("app_name") if isinstance(result, dict) else None,
+        )
 
     return _checker 

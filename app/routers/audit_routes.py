@@ -6,7 +6,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, Query, HTTPException
 from fastapi.responses import JSONResponse
 
-from app.models import AuditLogRecord
+from app.models import AuditLogRecord, AuthContext
 from app.utils.dependencies import get_supabase_async
 from app.utils.require_scope import require_scope
 from app.utils.database import query_many
@@ -19,12 +19,12 @@ AUDIT_TABLE = "audit_logs"
 async def list_audit_logs(
     limit: int = Query(100, ge=1, le=1000),
     cursor: str | None = Query(None, description="Cursor '<iso>,<id>' from X-Next-Cursor header"),
-    account_id: str = Depends(require_scope("admin")),
+    auth: AuthContext = Depends(require_scope("admin")),
     supabase=Depends(get_supabase_async),
 ):
     """Paginated audit log list (newest first)."""
 
-    match = {"actor_id": account_id}
+    match = {"actor_id": auth.account_id}
     or_filter = None
     if cursor:
         try:

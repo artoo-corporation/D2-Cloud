@@ -14,18 +14,22 @@ from hashlib import sha256
 from datetime import datetime, timezone
 import secrets
 
-from fastapi import APIRouter, Depends, HTTPException, Path, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Path, status
 
 from app.models import (
     APITokenResponse,
+    AuditAction,
+    AuditStatus,
     MessageResponse,
     TokenCreateRequest,
     TokenCreateResponse,
 )
 from app.models.scopes import Scope
+from app.utils.audit import extract_token_details_for_audit, log_audit_event
 from app.utils.dependencies import get_supabase_async, require_token_admin, require_actor_admin, Actor
-from app.utils.database import insert_data, query_data, update_data
-from app.utils.security_utils import hash_token, compute_token_lookup
+from app.utils.database import insert_data, query_data, query_one, update_data
+from app.utils.security_utils import hash_token, compute_token_lookup, verify_api_token
+from app.utils.utils import normalize_app_name
 
 API_TOKEN_TABLE = "api_tokens"
 TOKEN_PREFIX = "d2_"
@@ -83,6 +87,21 @@ async def create_token(
     if actor.account_id != account_id:
         raise HTTPException(status_code=403, detail="account_mismatch")
 
+    # Handle assigned_user_id: validate that the target user belongs to the same account
+    assigned_user_id = payload.assigned_user_id if payload else None
+    if assigned_user_id:
+        # Verify the assigned user belongs to the same account
+        user_check = await query_one(
+            supabase,
+            "users",
+            match={"user_id": assigned_user_id, "account_id": account_id}
+        )
+        if not user_check:
+            raise HTTPException(status_code=400, detail="assigned_user_not_in_account")
+    else:
+        # Default to current user
+        assigned_user_id = actor.user_id
+
     existing = await _token_count(supabase, account_id)
 
     if existing == 0:
@@ -122,8 +141,20 @@ async def create_token(
             "account_id": account_id,
             "scopes": scopes,
             "expires_at": None,
-            "created_by_user_id": actor.user_id,
+            "created_by_user_id": actor.user_id,  # Who created the token
+            "assigned_user_id": assigned_user_id,  # Who owns/uses the token
+            "app_name": normalize_app_name(payload.app_name) if payload and payload.app_name else None,
         },
+    )
+
+    # Audit log token creation
+    await log_audit_event(
+        supabase,
+        action=AuditAction.token_create,
+        actor_id=account_id,
+        status=AuditStatus.success,
+        token_id=token_id,
+        user_id=actor.user_id,
     )
 
     return TokenCreateResponse(
@@ -191,10 +222,10 @@ async def list_tokens(
 async def revoke_token(
     account_id: str = Path(...),
     token_id: str = Path(..., description="Token ID to revoke"),
-    caller_account: str = Depends(require_token_admin),
+    actor: Actor = Depends(require_actor_admin),
     supabase=Depends(get_supabase_async),
 ):
-    if caller_account != account_id:
+    if actor.account_id != account_id:
         raise HTTPException(status_code=403, detail="account_mismatch")
 
     await update_data(
@@ -205,4 +236,181 @@ async def revoke_token(
         error_message="token_revoke_failed",
     )
 
-    return MessageResponse(message="token_revoked") 
+    # Audit log token revocation with user attribution
+    await log_audit_event(
+        supabase,
+        action=AuditAction.token_revoke,
+        actor_id=account_id,
+        status=AuditStatus.success,
+        token_id=token_id,
+        user_id=actor.user_id,
+    )
+
+    return MessageResponse(message="token_revoked")
+
+
+# ---------------------------------------------------------------------------
+# Token rotation
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/tokens/{token_id}/rotate",
+    response_model=TokenCreateResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def rotate_token(
+    account_id: str = Path(...),
+    token_id: str = Path(..., description="Token ID to rotate"),
+    caller_account: str = Depends(require_token_admin),
+    supabase=Depends(get_supabase_async),
+):
+    """Rotate a token: create new token with same settings, revoke old one."""
+    
+    if caller_account != account_id:
+        raise HTTPException(status_code=403, detail="account_mismatch")
+
+    # Get existing token details
+    existing_token = await query_one(
+        supabase,
+        API_TOKEN_TABLE,
+        match={"account_id": account_id, "token_id": token_id},
+    )
+    
+    if not existing_token:
+        raise HTTPException(status_code=404, detail="token_not_found")
+    
+    if existing_token.get("revoked_at"):
+        raise HTTPException(status_code=410, detail="token_already_revoked")
+
+    # Generate new token with same properties
+    new_token_id = str(uuid4())
+    raw_token = f"{TOKEN_PREFIX}{secrets.token_urlsafe(32)}"
+    token_sha = sha256(raw_token.encode()).hexdigest()
+    token_sha_hashed = await hash_token(token_sha)
+    token_lookup = compute_token_lookup(raw_token)
+
+    # Create new token
+    await insert_data(
+        supabase,
+        API_TOKEN_TABLE,
+        {
+            "token_id": new_token_id,
+            "token_sha256": token_sha_hashed,
+            "token_name": existing_token.get("token_name"),
+            **({"token_lookup": token_lookup} if token_lookup is not None else {}),
+            "account_id": account_id,
+            "scopes": existing_token.get("scopes", []),
+            "expires_at": None,
+            "created_by_user_id": existing_token.get("created_by_user_id"),
+            "app_name": existing_token.get("app_name"),
+        },
+    )
+
+    # Revoke old token
+    await update_data(
+        supabase,
+        API_TOKEN_TABLE,
+        update_values={"revoked_at": datetime.now(timezone.utc)},
+        filters={"account_id": account_id, "token_id": token_id},
+        error_message="token_revoke_failed",
+    )
+
+    # Audit log token rotation with user attribution
+    await log_audit_event(
+        supabase,
+        action=AuditAction.token_rotate,
+        actor_id=account_id,
+        status=AuditStatus.success,
+        token_id=new_token_id,  # New token ID
+        user_id=existing_token.get("created_by_user_id"),
+    )
+
+    return TokenCreateResponse(
+        token_id=new_token_id,
+        token=raw_token,
+        scopes=existing_token.get("scopes", []),
+        expires_at=None,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Token scopes (for frontend dropdown)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/scopes", response_model=list[dict])
+async def list_available_scopes():
+    """Return available token role scopes with descriptions (for token creation dropdown)."""
+    
+    # Role scopes with their descriptions
+    role_scopes = {
+        Scope.admin: {
+            "label": "Admin",
+            "description": "Full access - all operations"
+        },
+        Scope.dev: {
+            "label": "Developer", 
+            "description": "Policy read/write, key upload, event ingest"
+        },
+        Scope.server: {
+            "label": "Server",
+            "description": "Policy read, event ingest"
+        }
+    }
+    
+    return [
+        {
+            "value": scope.value,
+            "label": info["label"],
+            "description": info["description"]
+        }
+        for scope, info in role_scopes.items()
+    ]
+
+
+# ---------------------------------------------------------------------------
+# User listing for token assignment (Frontend only)
+# ---------------------------------------------------------------------------
+
+from typing import Dict
+
+@router.get("/users")
+async def list_account_users(
+    account_id: str = Path(..., description="Account ID"),
+    actor: Actor = Depends(require_actor_admin),
+    supabase=Depends(get_supabase_async),
+):
+    """List all users in the account for token assignment dropdown.
+    
+    Returns:
+        List of users with basic info for frontend dropdowns
+    """
+    # Enforce Supabase session and account match
+    if actor.user_id is None:
+        raise HTTPException(status_code=403, detail="supabase_session_required")
+    if actor.account_id != account_id:
+        raise HTTPException(status_code=403, detail="account_mismatch")
+
+    # Query users in the account
+    resp = await query_data(
+        supabase,
+        "users",
+        filters={"account_id": account_id},
+        select_fields="user_id,email,display_name,full_name"
+    )
+    
+    users_data = getattr(resp, "data", []) or []
+    
+    # Format for frontend dropdown
+    users = []
+    for user in users_data:
+        display_name = user.get("display_name") or user.get("full_name") or user.get("email") or "Unknown User"
+        users.append({
+            "user_id": user["user_id"],
+            "display_name": display_name,
+            "email": user.get("email"),
+            "full_name": user.get("full_name")
+        })
+    
+    return {"users": users} 

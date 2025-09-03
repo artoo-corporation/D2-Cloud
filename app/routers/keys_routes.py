@@ -6,10 +6,11 @@ import base64
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, Header, HTTPException, status, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status, Query
 from app.utils.require_scope import require_scope
 
-from app.models import MessageResponse, PublicKeyAddRequest, PublicKeyResponse, TokenScopeError
+from app.models import AuditAction, AuditStatus, AuthContext, MessageResponse, PublicKeyAddRequest, PublicKeyResponse, TokenScopeError
+from app.utils.audit import log_audit_event
 from app.utils.dependencies import get_supabase_async, require_token_admin
 from app.utils.database import insert_data, update_data, query_data
 
@@ -25,11 +26,12 @@ PUBLIC_KEYS_TABLE = "public_keys"
     responses={403: {"model": TokenScopeError}},
 )
 async def add_public_key(
+    request: Request,
     payload: PublicKeyAddRequest,
+    auth: AuthContext = Depends(require_scope("key.upload")),
     supabase=Depends(get_supabase_async),
-    account_id: str = Depends(require_scope("key.upload")),
 ):
-    # account_id supplied by dependency – admin scope replaced by key.upload capability
+    # auth.account_id supplied by dependency – admin scope replaced by key.upload capability
 
     # Validate base64 public key
     try:
@@ -44,15 +46,27 @@ async def add_public_key(
         supabase,
         PUBLIC_KEYS_TABLE,
         {
-            "account_id": account_id,
+            "account_id": auth.account_id,
             "key_id": key_id,
             "algo": "ed25519",
             "public_key": "\\x" + key_bytes.hex(),  # bytea hex format for PostgREST
+            "user_id": auth.user_id,  # Track which user uploaded this key
         },
     )
 
     if result == "duplicate":
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="key_already_exists")
+
+    # Audit log key upload with user attribution
+    await log_audit_event(
+        supabase,
+        action=AuditAction.key_upload,
+        actor_id=auth.account_id,
+        status=AuditStatus.success,
+        token_id=auth.token_id,
+        user_id=auth.user_id,
+        key_id=key_id,
+    )
 
     return MessageResponse(message="key_added")
 
@@ -60,15 +74,26 @@ async def add_public_key(
 @router.delete("/{key_id}", response_model=MessageResponse, status_code=status.HTTP_202_ACCEPTED)
 async def revoke_key(
     key_id: str,
-    account_id: str = Depends(require_token_admin),
+    auth: AuthContext = Depends(require_scope("key.upload")),
     supabase=Depends(get_supabase_async),
 ):
     await update_data(
         supabase,
         PUBLIC_KEYS_TABLE,
         update_values={"revoked_at": datetime.now(timezone.utc)},
-        filters={"account_id": account_id, "key_id": key_id},
+        filters={"account_id": auth.account_id, "key_id": key_id},
         error_message="key_revoke_failed",
+    )
+
+    # Audit log key revocation
+    await log_audit_event(
+        supabase,
+        action=AuditAction.key_revoke,
+        actor_id=auth.account_id,
+        status=AuditStatus.success,
+        token_id=auth.token_id,
+        user_id=auth.user_id,
+        key_id=key_id,
     )
 
     return MessageResponse(message="key_revoked")
@@ -77,22 +102,21 @@ async def revoke_key(
 @router.get("", response_model=list[PublicKeyResponse])
 async def list_keys(
     include_revoked: int = Query(0, ge=0, le=1),
-    account_id: str = Depends(require_token_admin),
+    auth: AuthContext = Depends(require_scope("key.upload")),
     supabase=Depends(get_supabase_async),
 ):
-    filters = {"account_id": account_id}
+    # Build query with user name join
+    query = supabase.table(PUBLIC_KEYS_TABLE).select(
+        "key_id,algo,public_key,created_at,revoked_at,user_id,users:user_id(display_name,full_name)"
+    ).eq("account_id", auth.account_id)
+    
     if not include_revoked:
-        filters["revoked_at"] = ("is", "null")
-
-    resp = await query_data(
-        supabase,
-        PUBLIC_KEYS_TABLE,
-        filters=filters,
-        select_fields="key_id,algo,public_key,created_at,revoked_at",
-    )
+        query = query.is_("revoked_at", "null")
+    
+    resp = await query.execute()
     rows = getattr(resp, "data", None) or []
     
-    # Convert public keys from hex format back to base64
+    # Convert public keys from hex format back to base64 and format user names
     result = []
     for row in rows:
         public_key_raw = row["public_key"]
@@ -104,6 +128,18 @@ async def list_keys(
             except ValueError:
                 # Skip malformed keys
                 continue
+        
+        # Extract user name from join
+        user_info = row.get("users")
+        uploaded_by_name = None
+        if user_info:
+            # Prefer display_name, fallback to full_name
+            uploaded_by_name = user_info.get("display_name") or user_info.get("full_name")
+        
+        # Clean up the row for response model
+        row.pop("users", None)  # Remove the join data
+        row["uploaded_by_name"] = uploaded_by_name
+        
         result.append(PublicKeyResponse(**row))
     
     return result 
