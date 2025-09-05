@@ -38,7 +38,7 @@ from app.utils.logger import logger
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from app.utils.policy_expiry import is_policy_expired, extract_and_sync_policy_expiry
 from app.utils.policy_validation import validate_d2_policy_bundle, get_policy_summary, extract_app_name
-from app.utils.security_utils import decrypt_private_jwk
+from app.utils.security_utils import decrypt_private_jwk, create_enhanced_jws
 
 router = APIRouter(prefix="/v1/policy", tags=["policy"])
 
@@ -55,9 +55,21 @@ async def get_policy_bundle(
     if_none_match: str | None = Header(None, alias="If-None-Match"),
     supabase=Depends(get_supabase_async),
 ):
-    # Override app_name with value from token if query param left as default
-    if app_name == "default" and auth.app_name:
-        app_name = auth.app_name
+    # Handle app_name resolution based on token type
+    if app_name == "default":
+        if auth.is_server() and auth.app_name:
+            # Server tokens with app_name can use automatic resolution
+            app_name = auth.app_name
+        elif auth.is_server():
+            # Server tokens without app_name use "default"
+            app_name = "default"
+        else:
+            # Dev/admin tokens cannot use automatic app_name resolution
+            # Return 404 as this is likely a server misconfigured with wrong token type
+            raise HTTPException(
+                status_code=404, 
+                detail="No policy found: app_name required for non-server tokens (server tokens have automatic app resolution)"
+            )
     
     # Normalize app name (convert spaces to underscores)
     app_name = normalize_app_name(app_name)
@@ -95,11 +107,17 @@ async def get_policy_bundle(
             )
 
     if not row:
-        raise HTTPException(status_code=404, detail="No policy found for account")
+        # Provide specific error message based on stage requested
+        if stage == "published":
+            raise HTTPException(status_code=404, detail=f"No published policy found for app '{app_name}'")
+        elif stage == "draft":
+            raise HTTPException(status_code=404, detail=f"No draft policy found for app '{app_name}'")
+        else:  # auto
+            raise HTTPException(status_code=404, detail=f"No policy found for app '{app_name}' (checked both published and draft)")
 
     # 4️⃣  Revocation enforcement
     if row.get("revocation_time") and datetime.fromisoformat(row["revocation_time"]).astimezone(timezone.utc) < datetime.now(timezone.utc):
-        raise HTTPException(status_code=410, detail="Policy revoked")
+        raise HTTPException(status_code=410, detail=f"Policy for app '{app_name}' has been revoked")
 
     # 5️⃣  Policy expiry enforcement and warnings
     policy_expires = row.get("expires")
@@ -116,7 +134,7 @@ async def get_policy_bundle(
 
     # 3️⃣  Ensure we actually found a policy row (defence-in-depth – should already be guaranteed)
     if not row or "jws" not in row:
-        raise HTTPException(status_code=404, detail="No policy found for account")
+        raise HTTPException(status_code=404, detail=f"Policy found for app '{app_name}' but missing JWS signature")
 
     # 4️⃣  Basic plan / quota enforcement (bundle size)
     account = await query_one(supabase, "accounts", match={"id": auth.account_id})
@@ -157,7 +175,13 @@ async def get_policy_bundle(
         client_etag = if_none_match.lstrip("W/").strip('"')
         if client_etag == etag:
             response.status_code = status.HTTP_304_NOT_MODIFIED
-            return  # No body for 304
+            # Return empty response for 304 - FastAPI will handle the empty body
+            return PolicyBundleResponse(
+                jws=None,
+                version=row["version"],
+                etag=etag,
+                bundle=None
+            )
 
     # Emit strong ETag (quoted)
     response.headers["ETag"] = f'"{etag}"'
@@ -416,11 +440,13 @@ async def publish_policy(
     private_jwk = decrypt_private_jwk(rsa_row["private_jwk"])
 
     # Sign the updated bundle with RSA key and correct kid
-    jws = jwt.encode(
-        updated_bundle,
-        private_jwk,
+    # Use the enhanced JWS creation function (no JWKS refresh for normal publishes)
+    jws = create_enhanced_jws(
+        payload=updated_bundle,
+        private_jwk=private_jwk,
+        kid=rsa_kid,
         algorithm=JWT_ALGORITHM,
-        headers={"kid": rsa_kid},
+        audience=f"d2-policy:{auth.account_id}:{app_name}",  # Specific audience for this policy
     )
     
     # Convert datetime to ISO string for database storage

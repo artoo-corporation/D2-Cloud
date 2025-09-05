@@ -42,16 +42,22 @@ async def add_public_key(
 
     key_id = payload.key_id or str(uuid.uuid4())
 
+    # Build insert data - only include user_id if it exists (server tokens have None)
+    insert_data_dict = {
+        "account_id": auth.account_id,
+        "key_id": key_id,
+        "algo": "ed25519",
+        "public_key": "\\x" + key_bytes.hex(),  # bytea hex format for PostgREST
+    }
+    
+    # Only add user_id if it's not None (server tokens don't have user_id)
+    if auth.user_id is not None:
+        insert_data_dict["user_id"] = auth.user_id
+    
     result = await insert_data(
         supabase,
         PUBLIC_KEYS_TABLE,
-        {
-            "account_id": auth.account_id,
-            "key_id": key_id,
-            "algo": "ed25519",
-            "public_key": "\\x" + key_bytes.hex(),  # bytea hex format for PostgREST
-            "user_id": auth.user_id,  # Track which user uploaded this key
-        },
+        insert_data_dict,
     )
 
     if result == "duplicate":
@@ -105,7 +111,7 @@ async def list_keys(
     auth: AuthContext = Depends(require_scope("key.upload")),
     supabase=Depends(get_supabase_async),
 ):
-    # Build query with user name join
+    # Build query with user name join (left join to handle NULL user_id from server tokens)
     query = supabase.table(PUBLIC_KEYS_TABLE).select(
         "key_id,algo,public_key,created_at,revoked_at,user_id,users:user_id(display_name,full_name)"
     ).eq("account_id", auth.account_id)
@@ -135,6 +141,9 @@ async def list_keys(
         if user_info:
             # Prefer display_name, fallback to full_name
             uploaded_by_name = user_info.get("display_name") or user_info.get("full_name")
+        elif row.get("user_id") is None:
+            # Key was uploaded by a server token (no user_id)
+            uploaded_by_name = "Server Token"
         
         # Clean up the row for response model
         row.pop("users", None)  # Remove the join data

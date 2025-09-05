@@ -39,7 +39,7 @@ SDK ↔ HTTPS ─────────────┐
 | `ENTERPRISE_POLL_SEC` | Optional override for Enterprise polling cadence. | 30 (seconds) |
 | `ENTERPRISE_EVENT_BATCH` | Optional SDK-side batching hint. | 5000 (events) |
 | `ENTERPRISE_EVENT_MAX_BYTES` | Optional per-plan event payload limit. | 32768 (bytes) |
-| `JWK_OVERLAP_DAYS` | Days two key-pairs overlap before pruning. | `7` (days) |
+| ~~`JWK_OVERLAP_DAYS`~~ | **REMOVED**: Days two key-pairs overlap before pruning (automated rotation handles this). | ~~`7` (days)~~ |
 
 > All cron scripts inherit the same env, so secrets live only in Vercel.
 
@@ -130,7 +130,9 @@ sequenceDiagram
 
 | Path | Scope | Behaviour |
 |------|-------|-----------|
-| **POST** `https://d2.artoo.love/v1/jwks/rotate` | *admin* | Generates 2048-bit RSA key-pair, encrypts private JWK, inserts row (kid = UUID).
+| **GET** `https://d2.artoo.love/.well-known/jwks.json` | *public* | Serves public keys with 60s cache control and debugging headers. |
+| **GET** `https://d2.artoo.love/v1/jwks/configuration` | *admin* | Returns current JWKS configuration for dashboard. |
+| **POST** `https://d2.artoo.love/v1/jwks/rotate` | *admin* | **Fully automated rotation**: generates new RSA key-pair → re-signs all policies → cleans up old keys after 2-minute delay. No cron jobs needed. |
 
 ---
 ## 5. Middleware & Limits
@@ -168,7 +170,7 @@ Bundle size, ingest interval and total event volume are safety limits, not price
 |--------|----------|--------|
 | `app.cron.revoke_enforcer` | `*/1 * * * *` | Marks policies `is_revoked` when `revocation_time < now()`.
 | `app.cron.trial_locker` | `0 2 * * *` | Converts expired trial accounts to `locked` plan.
-| `app.cron.key_rotation_sweeper` | `0 3 * * *` | Deletes private JWKs older than overlap window (`JWK_OVERLAP_DAYS`). |
+| ~~`app.cron.key_rotation_sweeper`~~ | ~~`0 3 * * *`~~ | **REMOVED**: Deletes private JWKs (replaced by automated rotation with intelligent cleanup). |
 | `app.cron.event_rollup` | `0 * * * *` | Ships newly-ingested events from Supabase → ClickHouse (`events_raw` table). |
 
 All cron modules are runnable locally via `python -m app.cron.<name>`.

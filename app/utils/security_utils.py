@@ -13,7 +13,7 @@ import bcrypt
 import hmac
 
 from fastapi import HTTPException, status
-from jose import jwk as jose_jwk
+from jose import jwk as jose_jwk, jwt as jose_jwt
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -161,7 +161,7 @@ async def verify_api_token(
             supabase,
             API_TOKEN_TABLE,
             filters={"token_lookup": lookup},
-            select_fields="token_id,token_sha256,scopes,account_id,expires_at,revoked_at",
+            select_fields="token_id,token_sha256,scopes,account_id,expires_at,revoked_at,app_name,created_by_user_id",
         )
         for candidate in getattr(resp, "data", []) or []:
             stored_hash = candidate.get("token_sha256", "")
@@ -175,7 +175,7 @@ async def verify_api_token(
             supabase,
             API_TOKEN_TABLE,
             filters={},
-            select_fields="token_id,token_sha256,scopes,account_id,expires_at,revoked_at",
+            select_fields="token_id,token_sha256,scopes,account_id,expires_at,revoked_at,app_name,created_by_user_id",
         )
         for candidate in getattr(resp, "data", []) or []:
             stored_hash = candidate.get("token_sha256", "")
@@ -305,4 +305,178 @@ async def get_active_private_jwk(account_id: str, supabase) -> Dict[str, Any]:
     if not key_row:
         raise HTTPException(status_code=500, detail="Signing key not found")
 
-    return decrypt_private_jwk(key_row["private_jwk"]) 
+    return decrypt_private_jwk(key_row["private_jwk"])
+
+
+def create_enhanced_jws(
+    payload: Dict[str, Any], 
+    private_jwk: Dict[str, Any], 
+    kid: str,
+    *,
+    jwks_refresh: bool = False,
+    rotation_id: str | None = None,
+    refresh_reason: str | None = None,
+    algorithm: str = "RS256",
+    audience: str | None = None
+) -> str:
+    """Create JWS with optional JWKS refresh control headers and proper JWT claims.
+    
+    Args:
+        payload: The policy bundle content to sign
+        private_jwk: The private JWK for signing
+        kid: Key ID for the JWS header
+        jwks_refresh: Whether to include JWKS refresh control flag
+        rotation_id: Optional rotation tracking ID
+        refresh_reason: Optional reason for JWKS refresh
+        algorithm: JWT algorithm (default: RS256)
+        audience: JWT audience claim (aud)
+        
+    Returns:
+        JWS token string
+    """
+    from datetime import datetime, timezone
+    
+    # Build JWS headers
+    headers = {"kid": kid}
+    
+    # Add JWKS refresh control headers if requested
+    if jwks_refresh:
+        headers["jwks_refresh"] = True
+        if rotation_id:
+            headers["rotation_id"] = rotation_id
+        if refresh_reason:
+            headers["refresh_reason"] = refresh_reason
+        # Add timestamp for tracking
+        headers["refresh_timestamp"] = datetime.now(timezone.utc).isoformat()
+    
+    # Create proper JWT payload with standard claims
+    now = datetime.now(timezone.utc)
+    jwt_payload = {
+        # Standard JWT claims
+        "iat": int(now.timestamp()),  # Issued at
+        "exp": int((now.replace(year=now.year + 1)).timestamp()),  # Expires in 1 year
+        "iss": "d2-policy-service",  # Issuer
+        # Always include audience claim - use generic format if not specified
+        "aud": audience if audience else "d2.policy",
+        # Keep the existing policy bundle structure for backward compatibility
+        **payload  # Spread the policy bundle directly into JWT payload
+    }
+    
+    # Create and return JWS
+    return jose_jwt.encode(
+        jwt_payload,
+        private_jwk,
+        algorithm=algorithm,
+        headers=headers,
+    )
+
+
+async def resign_active_policies(
+    account_id: str, 
+    new_kid: str, 
+    rotation_id: str,
+    supabase
+) -> Dict[str, Any]:
+    """Re-sign all active policy bundles with new JWKS key.
+    
+    Args:
+        account_id: Account to re-sign policies for
+        new_kid: New JWKS key ID
+        rotation_id: Rotation tracking ID
+        supabase: Supabase client
+        
+    Returns:
+        Dictionary with re-signing statistics
+    """
+    from app.utils.database import query_many, update_data
+    from app.utils.logger import logger
+    
+    # Get all active (non-revoked, published) policies for this account
+    active_policies = await query_many(
+        supabase,
+        "policies",
+        match={
+            "account_id": account_id,
+            "revocation_time": ("is", None),  # Not revoked
+            "is_draft": False,  # Published policies only
+            "active": True,  # Currently active
+        },
+        select_fields="id,bundle,version,app_name,jws,resigned_count",
+    )
+    
+    if not active_policies:
+        logger.info(f"No active policies found for account {account_id}")
+        return {"policies_resigned": 0, "errors": []}
+    
+    # Get the new private key for signing
+    new_key_row = await query_one(
+        supabase,
+        JWKS_TABLE,
+        match={"account_id": account_id, "kid": new_kid},
+    )
+    if not new_key_row:
+        raise RuntimeError(f"New JWKS key {new_kid} not found for account {account_id}")
+    
+    private_jwk = decrypt_private_jwk(new_key_row["private_jwk"])
+    
+    # Re-sign each policy bundle
+    resigned_count = 0
+    errors = []
+    
+    for policy in active_policies:
+        try:
+            # Find the maximum version for this app to avoid constraint violations
+            max_version_row = await query_one(
+                supabase,
+                "policies",
+                match={
+                    "account_id": account_id,
+                    "app_name": policy["app_name"],
+                },
+                order_by=("version", "desc"),
+                select_fields="version",
+            )
+            next_version = (max_version_row["version"] if max_version_row else policy["version"]) + 1
+            
+            # Create new JWS with JWKS refresh control headers
+            new_jws = create_enhanced_jws(
+                payload=policy["bundle"],
+                private_jwk=private_jwk,
+                kid=new_kid,
+                jwks_refresh=True,
+                rotation_id=rotation_id,
+                refresh_reason="automated_key_rotation",
+                audience=f"d2-policy:{account_id}:{policy.get('app_name', 'default')}",  # Include audience
+            )
+            
+            # Update the policy record with proper version increment and tracking
+            await update_data(
+                supabase,
+                "policies",
+                update_values={
+                    "jws": new_jws,
+                    "version": next_version,  # Use calculated next version
+                    "resigned_at": datetime.now(timezone.utc),
+                    "resigned_count": (policy.get("resigned_count", 0) or 0) + 1,
+                    "rotation_id": rotation_id,
+                    "signed_with_kid": new_kid,
+                },
+                filters={"id": policy["id"]},
+                error_message="policy_resign_failed",
+            )
+            
+            logger.info(f"Re-signed policy {policy['id']} (app: {policy['app_name']}) with new key {new_kid}, version {policy['version']} -> {next_version}")
+            resigned_count += 1
+            
+        except Exception as e:
+            error_msg = f"Failed to re-sign policy {policy['id']} (app: {policy.get('app_name', 'unknown')}): {e}"
+            logger.error(error_msg)
+            errors.append(error_msg)
+            # Continue with other policies, don't fail entire rotation
+    
+    return {
+        "policies_resigned": resigned_count,
+        "total_policies": len(active_policies),
+        "errors": errors,
+        "rotation_id": rotation_id,
+    } 

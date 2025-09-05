@@ -1,6 +1,6 @@
 # D2 Cloud Control-Plane – Codebase Reference
 
-*Last updated: 2025-08-28 – includes AuthContext refactor and app name normalization*
+*Last updated: 2025-09-04 – includes JWKS rotation automation, JWT structure enhancements, and server tokens*
 
 ---
 
@@ -84,6 +84,8 @@ SUPABASE_KEY   – required secret service key
 * **AES-GCM encryption** of private JWKs at rest (env `JWK_AES_KEY`).  Falls
   back to plaintext JSON when the key is absent (dev/test convenience).
 * **get_active_private_jwk** – fetches the newest encrypted key for a tenant.
+* **create_enhanced_jws** – **NEW**: Creates JWT-structured policy bundles with standard claims (`iat`, `exp`, `iss`, `aud`) and optional JWKS refresh control headers for automated key rotation.
+* **resign_active_policies** – **NEW**: Automated policy re-signing during JWKS rotation, maintaining version consistency and tracking rotation metadata.
 
 ### app/utils/database.py
 
@@ -147,16 +149,18 @@ All paths below are fully-qualified with the base URL `https://d2.artoo.love`.
 | ------ | ---- | ---- | ----------- |
 | GET | `/v1/accounts/me` | Bearer token | Returns plan info, quotas, and account metadata. |
 | POST | `/v1/accounts/{account_id}/tokens` | Supabase JWT | Creates **long-lived opaque API key** with app assignment and user assignment. |
+| POST | `/v1/accounts/{account_id}/tokens/server` | Admin token | **NEW**: Creates server tokens (not user-assigned) with fixed `server` scope for production systems. |
 | GET | `/v1/accounts/{account_id}/tokens` | Supabase JWT | Lists tokens with creator/assignee names. |
 | DELETE | `/v1/accounts/{account_id}/tokens/{token_id}` | Supabase JWT | Revokes token. |
 | POST | `/v1/accounts/{account_id}/tokens/{token_id}/rotate` | Supabase JWT | **NEW**: Generates new token value, revokes old one. |
 | GET | `/v1/accounts/{account_id}/tokens/scopes` | Supabase JWT | **NEW**: Lists available scopes for token creation UI. |
 | GET | `/v1/accounts/{account_id}/tokens/users` | Supabase JWT | **NEW**: Lists users for token assignment dropdown. |
 
-**Key Changes (2025-08-28):**
+**Key Changes (2025-08-28 & 2025-09-04):**
 - Token creation now supports `app_name` and `assigned_user_id` for better organization
 - All app names are automatically normalized (spaces → underscores)
 - Authentication switched to Supabase JWTs for dashboard-only access
+- **NEW**: Server tokens for production systems (no user assignment, fixed `server` scope)
 
 ### 5.2 Policy Service (`app/routers/policy_routes.py` – prefix `/v1/policy`)
 
@@ -202,8 +206,71 @@ All paths below are fully-qualified with the base URL `https://d2.artoo.love`.
 
 ### 5.4 JWKS (`app/routers/jwks_routes.py`)
 
-* **Public discovery:** `GET https://d2.artoo.love/.well-known/jwks.json` (rate-limited 60/min).
-* **Admin rotation:** `POST https://d2.artoo.love/v1/jwks/rotate` – generates fresh RSA pair, stores encrypted private key and publishes the public part.
+| Method | Path | Auth | Description |
+| ------ | ---- | ---- | ----------- |
+| GET | `/.well-known/jwks.json` | None | **Public discovery** endpoint (rate-limited 60/min). Enhanced with debugging headers and 60s cache control. |
+| GET | `/v1/jwks/configuration` | Admin token | **NEW**: Get current JWKS configuration for dashboard display. |
+| GET | `/v1/jwks/history` | Admin token | **NEW**: Get complete JWKS rotation history and key lifecycle. |
+| POST | `/v1/jwks/rotate` | Admin token | **Automated rotation** with zero-disruption policy re-signing and smart cleanup. |
+
+**Key Features (2025-09-04):**
+- **Fully Automated Rotation**: Single API call triggers complete key lifecycle management
+- **Smart Cache Management**: 60-second cache with `must-revalidate` for faster rotation propagation
+- **Automatic Policy Re-signing**: Updates all active policies with new signatures and version increments
+- **Intelligent Cleanup**: 2-minute delay ensures SDK cache refresh before removing old keys
+- **Zero Disruption**: No downtime or manual intervention required
+- **Rotation Tracking**: Comprehensive logging and history with rotation IDs and metadata
+- **Enhanced Debugging**: Additional headers (`X-JWKS-Key-Count`, `X-JWKS-Key-IDs`, `X-JWKS-Generated-At`) for troubleshooting
+- **Eliminates Cron Jobs**: No more manual key sweeping or cleanup scripts needed
+
+### 5.4.1 JWT Policy Bundle Structure (2025-09-04)
+
+**Important**: The system creates only **one type of JWT** - Policy Bundle JWTs for SDK verification. No JWTs are used for authentication (those are opaque tokens).
+
+**Complete JWT Structure:**
+```json
+// Header
+{
+  "alg": "RS256",
+  "typ": "JWT", 
+  "kid": "96a71937-5d5b-4c81-b418-2abad9116850",
+  // Optional rotation headers (during key rotation)
+  "jwks_refresh": true,
+  "rotation_id": "rot_f6188bb0-c023-47d4-86c5-13ad0fbc3b92_20250904_013751",
+  "refresh_reason": "automated_key_rotation",
+  "refresh_timestamp": "2025-09-04T01:37:51.123Z"
+}
+
+// Payload
+{
+  // Standard JWT claims
+  "iat": 1725419871,                                    // Issued at
+  "exp": 1756955871,                                    // Expires in 1 year
+  "iss": "d2-policy-service",                           // Issuer
+  "aud": "d2-policy:account_123:my_app",                // Audience (specific)
+  
+  // Policy bundle content (spread directly into payload)
+  "metadata": {
+    "name": "my_app",                                   // App name (REQUIRED)
+    "expires": "2024-12-31T23:59:59Z",                 // Policy expiry
+    "description": "Production authorization policies"   // Optional
+  },
+  "policies": [
+    {
+      "resource": "database.users",
+      "action": "*", 
+      "effect": "allow",
+      "conditions": { "user.role": "admin" }
+    }
+  ]
+}
+```
+
+**Key Features:**
+- **Flat Structure**: Policy bundle content spread directly into JWT payload (not nested)
+- **Smart Rotation Hints**: Headers include `jwks_refresh` flags for proactive SDK cache refresh
+- **Long Expiry**: JWTs expire in 1 year (policies control actual authorization expiry)
+- **Account-Specific Audience**: `d2-policy:{account_id}:{app_name}` format for security
 
 ### 5.5 Public Keys (`app/routers/keys_routes.py` – prefix `/v1/keys`)
 
@@ -213,11 +280,12 @@ All paths below are fully-qualified with the base URL `https://d2.artoo.love`.
 | DELETE | `/v1/keys/{key_id}` | Soft-revoke a key. **NEW**: Uses AuthContext, adds audit logging. |
 | GET | `/v1/keys` | List keys with user attribution; `include_revoked` query-param. **NEW**: Returns uploader names. |
 
-**Key Changes (2025-08-28):**
+**Key Changes (2025-08-28 & 2025-09-04):**
 - Public keys now track which user uploaded them via `user_id` field
 - Key listing includes uploader display names for UI attribution
 - Consistent AuthContext usage across all key management endpoints
 - Enhanced audit logging for key revocations
+- **NEW**: Server token support - keys uploaded by server tokens show "Server Token" as uploader
 
 ### 5.6 Multi-Tenancy (`invitations_routes.py` – prefix `/v1/invitations`)
 
@@ -288,12 +356,12 @@ The code interacts with these tables (names are hard-coded):
 | Table | Purpose |
 | ----- | ------- |
 | `accounts` | Tenant metadata (plan, trial expiry, metrics toggle, etc.). |
-| `api_tokens` | Bearer token store (`token_id`, bcrypt-hashed `token_sha256`, scopes, expiry, revoked_at). |
+| `api_tokens` | Bearer token store (`token_id`, bcrypt-hashed `token_sha256`, scopes, expiry, revoked_at, `assigned_user_id`, `created_by_user_id`, `app_name`). **NEW**: Enhanced with user tracking and server token support. |
 | `events` | Raw usage events (mirrored from ingest endpoint). |
 | `export_state` | Single-row high-water mark for Cron export to ClickHouse. |
 | `jwks_keys` | RSA key pairs per tenant (`kid`, `public_jwk`, encrypted `private_jwk`). |
-| `policies` | Policy bundles (draft & published versions, JWS, revocation time). |
-| `public_keys` | User-managed Ed25519 keys for signing publish requests. |
+| `policies` | Policy bundles (draft & published versions, JWS, revocation time, `resigned_at`, `resigned_count`, `rotation_id`, `signed_with_kid`). **NEW**: Enhanced with rotation tracking. |
+| `public_keys` | User-managed Ed25519 keys for signing publish requests (`user_id` for attribution). **NEW**: Tracks uploader identity. |
 | `audit_logs` | (Used only for force-publish tracking). |
 
 ---
@@ -303,11 +371,11 @@ The code interacts with these tables (names are hard-coded):
 | File | Schedule (external) | Function |
 | ---- | ------------------- | -------- |
 | `event_rollup.py` | e.g. every 5 min | Ships new rows from `events` to ClickHouse via HTTP JSONEachRow. Maintains checkpoint in `export_state`. |
-| `key_rotation_sweeper.py` | daily | Rotates / garbage-collects stale RSA keys (file present, logic TBD). |
+| ~~`key_rotation_sweeper.py`~~ | ~~daily~~ | **REMOVED**: Manual key cleanup (replaced by automated rotation workflow). |
 | `revoke_enforcer.py` | hourly | Deletes/archives tokens or policies past revocation window. |
 | `trial_locker.py` | daily | Downgrades expired trial accounts to `locked` plan (enforces 0-tool quota). |
 
-*(The `api/cron_*.py` copies are legacy duplicates kept for compatibility – prefer `app/cron/*`.)*
+*(The `api/cron_*.py` copies are legacy duplicates kept for compatibility – prefer `app/cron/*`. Note: `api/cron_key_rotation.py` has been removed as it's replaced by automated JWKS rotation.)*
 
 ---
 
@@ -415,7 +483,8 @@ tests/               – pytest suite with Supabase stub
 4. Background cron **event_rollup** exports the events table to ClickHouse for
    analytics dashboards.
 5. JWKS discovery for offline bundle verification is served at
-   `https://d2.artoo.love/.well-known/jwks.json` with strong 5-minute cache headers.
+   `https://d2.artoo.love/.well-known/jwks.json` with 60-second cache headers and enhanced debugging information.
+6. **Automated JWKS rotation** provides zero-disruption key updates with intelligent policy re-signing and cache management.
 
 ---
 

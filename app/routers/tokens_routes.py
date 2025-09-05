@@ -21,11 +21,12 @@ from app.models import (
     AuditAction,
     AuditStatus,
     MessageResponse,
+    ServerTokenRequest,
     TokenCreateRequest,
     TokenCreateResponse,
 )
 from app.models.scopes import Scope
-from app.utils.audit import extract_token_details_for_audit, log_audit_event
+from app.utils.audit import log_audit_event
 from app.utils.dependencies import get_supabase_async, require_token_admin, require_actor_admin, Actor
 from app.utils.database import insert_data, query_data, query_one, update_data
 from app.utils.security_utils import hash_token, compute_token_lookup, verify_api_token
@@ -161,6 +162,80 @@ async def create_token(
         token_id=token_id,
         token=raw_token,
         scopes=scopes,
+        expires_at=None,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Create server token (account-level, not user-assigned)
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/tokens/server",
+    response_model=TokenCreateResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_server_token(
+    account_id: str = Path(..., description="Target account ID"),
+    payload: ServerTokenRequest | None = None,
+    actor: Actor = Depends(require_actor_admin),  # Must be account admin (can be token or user)
+    supabase=Depends(get_supabase_async),
+):
+    """Issue a new server API token.
+    
+    Server tokens are designed for server-to-server communication:
+    • Fixed scopes: ["server"] (policy.read + event.ingest)
+    • Not assigned to individual users
+    • Survive user departures/role changes
+    • Intended for production services
+    """
+    
+    # Ensure caller has admin access to the account (but don't require Supabase session)
+    if actor.account_id != account_id:
+        raise HTTPException(status_code=403, detail="account_mismatch")
+    
+    # Server tokens always get "server" scope (policy.read + event.ingest)
+    scopes = [Scope.server]
+    
+    # Generate token
+    token_id = str(uuid4())
+    raw_token = f"d2_{secrets.token_urlsafe(32)}"
+    token_sha = sha256(raw_token.encode()).hexdigest()
+    hashed_token = await hash_token(token_sha)
+    
+    # Insert into database (no assigned_user_id for server tokens)
+    await insert_data(
+        supabase,
+        "api_tokens",
+        {
+            "token_id": token_id,
+            "account_id": account_id,
+            "token_sha256": hashed_token,  # Column is token_sha256, not token_hash
+            "token_lookup": compute_token_lookup(raw_token),  # Column is token_lookup, not lookup
+            "scopes": [s.value for s in scopes],
+            "token_name": payload.token_name if payload else "Server Token",
+            "app_name": payload.app_name if payload else None,
+            "assigned_user_id": None,  # Server tokens are not user-assigned
+            "created_by_user_id": actor.user_id,  # Track who created the server token
+            "expires_at": None,  # Server tokens don't expire by default
+        },
+    )
+    
+    # Log audit event
+    await log_audit_event(
+        supabase,
+        action=AuditAction.token_create,
+        actor_id=account_id,
+        status=AuditStatus.success,
+        token_id=token_id,
+        user_id=actor.user_id,  # Will be None for server tokens, which is fine
+    )
+    
+    return TokenCreateResponse(
+        token_id=token_id,
+        token=raw_token,  # Return plaintext token (only time it's visible)
+        scopes=[s.value for s in scopes],
         expires_at=None,
     )
 

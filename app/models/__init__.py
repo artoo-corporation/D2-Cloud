@@ -54,6 +54,10 @@ class AuthContext:
     def is_dev(self) -> bool:
         """Check if this is a dev token."""
         return "dev" in self.scopes
+    
+    def is_server(self) -> bool:
+        """Check if this is a server token."""
+        return "server" in self.scopes
 
 # ---------------------------------------------------------------------------
 # Enums – shareable across request / DB models
@@ -185,6 +189,12 @@ class TokenCreateRequest(BaseModel):
     app_name: Optional[str] = Field(None, description="Associate token with specific app")
     assigned_user_id: Optional[str] = Field(None, description="Assign token to specific user (defaults to current user)")
 
+class ServerTokenRequest(BaseModel):
+    """Request model for creating server tokens (not assigned to individual users)."""
+    token_name: Optional[str] = Field(None, description="Friendly label for the server token")
+    app_name: Optional[str] = Field(None, description="Associate token with specific app")
+
+
 class TokenCreateResponse(BaseModel):
     token_id: str
     token: str  # plaintext token (returned only once)
@@ -315,3 +325,39 @@ class AuditLogRecord(BaseModel):
     key_id: str | None = None
     version: int | None = None
     created_at: datetime
+
+
+class JWKSConfigurationResponse(BaseModel):
+    """Current JWKS configuration for an account."""
+    current_key_id: str = Field(..., description="Current active key ID") 
+    algorithm: str = Field(..., description="Key algorithm (e.g., 'RS256')")
+    jwks_url: str = Field(..., description="Public JWKS URL for this account")
+    public_key: Dict[str, Any] = Field(..., description="Current public key JWK")
+    rotation_enabled: bool = Field(False, description="Whether automatic rotation is enabled")
+    rotation_interval_days: int = Field(90, description="Rotation interval in days")
+
+
+class JWKSRotationResponse(BaseModel):
+    """Response from JWKS key rotation."""
+    message: str = Field(..., description="Success message")
+    new_key_id: str = Field(..., description="ID of the newly created key")
+    algorithm: str = Field(..., description="Algorithm of the new key")
+    rotation_completed_at: datetime = Field(..., description="When the rotation was completed")
+    old_keys_expire_at: datetime = Field(..., description="When old keys will be cleaned up")
+
+
+class JWKSKeyHistoryItem(BaseModel):
+    """Individual key in JWKS history."""
+    key_id: str = Field(..., description="Key ID")
+    algorithm: str = Field(..., description="Key algorithm")
+    created_at: datetime = Field(..., description="When this key was created")
+    expires_at: Optional[datetime] = Field(None, description="When this key expires (if set)")
+    is_active: bool = Field(..., description="Whether this is the currently active key")
+    public_key: Dict[str, Any] = Field(..., description="Public key JWK")
+
+
+class JWKSHistoryResponse(BaseModel):
+    """Complete JWKS rotation history for an account."""
+    keys: List[JWKSKeyHistoryItem] = Field(..., description="List of all keys, newest first")
+    total_rotations: int = Field(..., description="Total number of rotations performed")
+    overlap_days: int = Field(7, description="Number of days keys overlap before cleanup")
