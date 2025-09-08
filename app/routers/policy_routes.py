@@ -496,8 +496,11 @@ async def publish_policy(
             },
         )
 
-    # Build response with additional headers
-    response = PolicyPublishResponse(jws=jws, version=new_version)
+    # Build response with JWS (consistent with GET /bundle endpoint)
+    response = PolicyPublishResponse(
+        jws=jws,
+        version=new_version
+    )
 
     # Compute ETag (sha256 of JWS)
     etag = sha256(jws.encode()).hexdigest()

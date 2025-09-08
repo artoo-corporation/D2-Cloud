@@ -1,33 +1,40 @@
 # D2 Cloud API Contracts
 
-*Last updated: 2025-08-28 – includes AuthContext refactor, app name normalization, and comprehensive audit logging*
+*Last updated: 2025-09-08 – includes dual policy publish responses, role management, app quotas, and frontend publishing*
 
 ## Overview
 
 This document provides comprehensive API contracts for the D2 Cloud control plane. It's designed to be used by frontend developers and LLMs to understand how to interact with the API correctly.
 
-## Recent Updates (2025-08-28)
+## Recent Updates (2025-09-08)
 
-### 🔄 AuthContext Refactor
-All routes now use clean, type-safe `AuthContext` objects instead of hidden `request.state` magic:
-```typescript
-// Routes now provide explicit auth context
-interface AuthContext {
-  account_id: string;
-  scopes: string[];
-  user_id?: string;
-  token_id?: string;
-  app_name?: string;
-}
-```
+### 🔄 Consistent JWS Responses
+Policy publishing returns JWS format for all authentication methods:
+- **Frontend and CLI/SDK**: Both receive JWS and version (consistent with GET /bundle)
+- **Frontend**: Can decode JWS to extract policy metadata (same as bundle endpoint)
+- **Backward Compatibility**: Maintains existing API contracts
 
-### 🏷️ App Name Normalization  
-All app names are automatically normalized (spaces → underscores) for consistency:
-- `"my app"` and `"my_app"` are treated as the same application
-- Prevents mismatches between API requests and database storage
+### 👥 Enhanced Role Management
+- New `dev` role for policy editing without admin privileges
+- Admin-only endpoint to change user roles (`PATCH /v1/accounts/{account_id}/users/{user_id}/role`)
+- Invitation system now restricts to `admin` and `dev` roles only
+- `owner` role is immutable and assigned automatically to first user
 
-### 📊 Enhanced Audit Logging
-Comprehensive tracking of all system actions with user attribution, resource metadata, and status tracking.
+### 📱 App Quota System
+Plan-based limits on the number of applications per account:
+- **Free**: 1 app, **Essentials**: 5 apps, **Pro**: 25 apps, **Enterprise**: 1000 apps
+- Quota enforced during policy publishing (not drafting)
+- Clear error messages and SDK guidance for quota exceeded scenarios
+
+### 🔐 Frontend Policy Publishing
+- Supabase JWT users can publish policies without cryptographic signing
+- API tokens still require `X-D2-Signature` and `X-D2-Key-Id` headers
+- Simplified frontend integration while maintaining CLI/SDK security
+
+### 🗃️ Database Schema Cleanup
+- Removed `description` column from policies table
+- Policy descriptions now managed via `bundle.metadata.description`
+- Cleaner separation of concerns between policy content and metadata
 
 ## Authentication
 
@@ -457,7 +464,7 @@ curl -X POST "/v1/policy/publish?app_name=my-app" \
   -d '{}'
 ```
 
-**Response**:
+**Response** *(Updated 2025-09-08 - JWS Format)*:
 ```json
 {
   "jws": "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiIsImtpZCI6IjEyMyJ9...",
@@ -476,9 +483,41 @@ X-D2-Poll-Seconds: 30
 - Subsequent: `If-Match: "current_etag"`
 
 **Frontend Usage**:
+
+**For Supabase JWT Users (Frontend)**:
 ```typescript
-// Publish flow
-const publishPolicy = async (keyId, privateKey) => {
+// Simplified publish flow - no signature required
+const publishPolicy = async (appName, supabaseJWT) => {
+  // 1. Get current ETag
+  const currentPolicy = await getCurrentPolicy();
+  
+  // 2. Publish (no signature needed)
+  const response = await fetch(`/v1/policy/publish?app_name=${appName}`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${supabaseJWT}`,
+      'If-Match': currentPolicy?.etag || '*',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({})
+  });
+  
+  if (response.status === 409) {
+    // ETag conflict - reload and retry
+    showConflictDialog();
+  } else if (response.ok) {
+    const result = await response.json();
+    // Frontend can decode JWS (consistent with GET /bundle)
+    const policyData = decodeJWS(result.jws);
+    showSuccessMessage(`Policy v${result.version} published for ${policyData.metadata.name}`);
+  }
+};
+```
+
+**For API Tokens (CLI/SDK)**:
+```typescript
+// Traditional flow with signature verification
+const publishPolicySDK = async (keyId, privateKey, apiToken) => {
   // 1. Get current ETag
   const currentPolicy = await getCurrentPolicy();
   
@@ -489,16 +528,17 @@ const publishPolicy = async (keyId, privateKey) => {
   const response = await fetch(`/v1/policy/publish?app_name=${appName}`, {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${devToken}`,
+      Authorization: `Bearer ${apiToken}`,
       'X-D2-Signature': signature,
       'X-D2-Key-Id': keyId,
       'If-Match': currentPolicy?.etag || '*'
     }
   });
   
-  if (response.status === 409) {
-    // ETag conflict - reload and retry
-    showConflictDialog();
+  if (response.ok) {
+    const result = await response.json();
+    // SDK gets JWS for distribution
+    return { jws: result.jws, version: result.version };
   }
 };
 ```
