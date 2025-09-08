@@ -46,7 +46,7 @@ def _event():
 
 
 def test_ingest_rate_limited(api_client, patch_verify, monkeypatch):
-    token = make_token(ACCOUNT, ["read"])
+    token = make_token(ACCOUNT, ["read", "event.ingest"])
 
     # Ensure account lookup returns a minimal row (patch the imported symbol on the router)
     import app.routers.events_routes as routes

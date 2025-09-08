@@ -1,12 +1,12 @@
 import time
-from app.utils.plans import enforce_event_limits, enforce_bundle_poll, MAX_BATCH_BYTES
+from app.utils.plans import enforce_event_limits, enforce_bundle_poll, get_plan_limit
 from fastapi import HTTPException, status
 
 ACCOUNT = "acct_test"
 
 
 def test_event_size_cap():
-    big = MAX_BATCH_BYTES + 1
+    big = get_plan_limit("free", "max_batch_bytes") + 1
     try:
         enforce_event_limits(ACCOUNT, "trial", big)
     except HTTPException as exc:
@@ -66,16 +66,15 @@ def test_bundle_poll_admin_token_no_throttle(monkeypatch):
 
 def test_bundle_poll_server_token_throttle(monkeypatch):
     """Server tokens should respect polling restrictions."""
+    import pytest
+
     enforce_bundle_poll(ACCOUNT, 60, token_scopes=["server"])
     now = time.time()
     monkeypatch.setattr(time, "time", lambda: now)
-    
-    try:
+
+    with pytest.raises(HTTPException) as exc:
         enforce_bundle_poll(ACCOUNT, 60, token_scopes=["server"])
-    except HTTPException as exc:
-        assert exc.status_code == status.HTTP_429_TOO_MANY_REQUESTS
-    else:
-        assert False, "expected HTTPException for server token"
+    assert exc.value.status_code == status.HTTP_429_TOO_MANY_REQUESTS
 
 
 def test_bundle_poll_mixed_scopes_dev_wins(monkeypatch):

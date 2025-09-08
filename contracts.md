@@ -286,6 +286,25 @@ const createToken = async (data) => {
 - **Admin tokens**: No polling limits (admin privilege)
 - **Server tokens**: Plan-based limits (30-300s for production)
 
+### 🔢 App Quota (NEW 2025-09-08)
+Each subscription plan now limits the number of *apps* (unique `app_name` values) per account:
+
+| Plan | Max Apps |
+|------|----------|
+| Free | 1 |
+| Essentials | 5 |
+| Pro | 25 |
+| Enterprise | 1000 |
+
+Attempting to **publish** a policy for a *new* app beyond the limit returns:
+
+```json
+{
+  "detail": "quota_apps_exceeded",
+  "message": "Your plan allows 5 apps; please upgrade to create more."
+}
+```
+
 **Headers** (429 Response):
 ```http
 Retry-After: 30
@@ -297,6 +316,56 @@ Retry-After: 30
 curl -H "Authorization: Bearer d2_server_token" \
      "/v1/policy/bundle?app_name=my-service"
 ```
+
+### 🤖 SDK Guidance: Handling `quota_apps_exceeded`
+
+When the SDK uploads a *new* policy bundle (or publishes a draft) it may receive a
+
+```http
+HTTP/1.1 403 Forbidden
+
+{
+  "detail": "quota_apps_exceeded",
+  "message": "Your plan allows 5 apps; please upgrade to create more."
+}
+```
+
+The SDK (or CI script) **MUST** interpret this as a *non-retryable* error:
+
+1. **Stop automatic retries** – further attempts will always fail until the plan is upgraded or an old app is deleted.
+2. **Surface actionable feedback** – bubble up the human-readable message so developers know why the publish failed.
+3. **Optional** – call `/v1/accounts/me` to fetch `quotas.max_apps` and display current usage vs. limit.
+
+Example TypeScript helper:
+
+```ts
+async function publishPolicy(appName: string, token: string) {
+  const resp = await fetch(`/v1/policy/publish?app_name=${appName}`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'If-Match': currentEtag || '*'
+    },
+    body: JSON.stringify({}),
+  });
+
+  if (resp.status === 403) {
+    const err = await resp.json();
+    if (err.detail === 'quota_apps_exceeded') {
+      throw new Error(
+        `Plan limit reached: ${err.message}. ` +
+        'Upgrade your plan or delete unused apps.'
+      );
+    }
+  }
+
+  if (!resp.ok) {
+    throw new Error(`Policy publish failed: ${resp.status}`);
+  }
+}
+```
+
+Including this logic ensures CI pipelines fail fast with a clear reason instead of looping indefinitely.
 
 ### PUT /v1/policy/draft
 
@@ -310,7 +379,8 @@ curl -H "Authorization: Bearer d2_server_token" \
   "bundle": {
     "metadata": {
       "name": "my-app",
-      "version": "1.2.0"
+      "version": "1.2.0",
+      "description": "Added new resource permissions"
     },
     "policies": [
       {
@@ -319,8 +389,7 @@ curl -H "Authorization: Bearer d2_server_token" \
       }
     ],
     "expiry": "2024-12-31T23:59:59Z"
-  },
-  "description": "Added new resource permissions"
+  }
 }
 ```
 
@@ -342,8 +411,7 @@ const saveDraft = async (bundleContent) => {
       'Content-Type': 'application/json'
     },
     body: JSON.stringify({
-      bundle: bundleContent,
-      description: "Updated permissions"
+      bundle: bundleContent
     })
   });
   
@@ -355,7 +423,7 @@ const saveDraft = async (bundleContent) => {
 
 ### POST /v1/policy/publish
 
-**Purpose**: Publish draft policy (requires Ed25519 signature)
+**Purpose**: Publish draft policy 
 
 **Auth**: `policy.publish` scope
 
@@ -363,9 +431,31 @@ const saveDraft = async (bundleContent) => {
 - `app_name`: App being published
 
 **Headers**:
-- `X-D2-Signature`: Base64 Ed25519 signature of request body
-- `X-D2-Key-Id`: Key ID used for signing
+- `X-D2-Signature`: Base64 Ed25519 signature of request body *(required for API tokens, optional for Supabase JWTs)*
+- `X-D2-Key-Id`: Key ID used for signing *(required for API tokens, optional for Supabase JWTs)*
 - `If-Match`: ETag for optimistic concurrency
+
+**Authentication Modes** *(Updated 2025-09-08)*:
+
+**Frontend Users (Supabase JWT)**:
+```bash
+# No signature required - just the JWT
+curl -X POST "/v1/policy/publish?app_name=my-app" \
+  -H "Authorization: Bearer $SUPABASE_JWT" \
+  -H "If-Match: current_etag" \
+  -d '{}'
+```
+
+**API Tokens (CLI/SDK)**:
+```bash
+# Signature required for security
+curl -X POST "/v1/policy/publish?app_name=my-app" \
+  -H "Authorization: Bearer $API_TOKEN" \
+  -H "X-D2-Signature: $BASE64_SIGNATURE" \
+  -H "X-D2-Key-Id: my-signing-key" \
+  -H "If-Match: current_etag" \
+  -d '{}'
+```
 
 **Response**:
 ```json
@@ -450,7 +540,6 @@ const publishPolicy = async (keyId, privateKey) => {
     "expires": "2024-12-31T23:59:59Z",
     "revocation_time": null,
     "app_name": "my-app",
-    "description": "Added new permissions",
     "published_by": "John Doe",
     "bundle": {...} // if include_bundle=true
   }
@@ -505,7 +594,6 @@ const loadVersionHistory = async () => {
     "version": 6,
     "is_draft": false,
     "active": true,
-    "description": "Production policy",
     "created_at": "2024-01-01T00:00:00Z"
   },
   {
@@ -514,7 +602,6 @@ const loadVersionHistory = async () => {
     "version": 7,
     "is_draft": true,
     "active": false,
-    "description": "Work in progress",
     "created_at": "2024-01-02T00:00:00Z"
   }
 ]
@@ -534,32 +621,12 @@ const loadVersionHistory = async () => {
   "version": 6,
   "is_draft": false,
   "active": true,
-  "description": "Production policy",
   "bundle": {...},
   "created_at": "2024-01-01T00:00:00Z",
   "published_at": "2024-01-01T12:00:00Z"
 }
 ```
 
-### PATCH /v1/policy/{policy_id}/description
-
-**Purpose**: Update policy description
-
-**Auth**: `policy.publish` scope
-
-**Request**:
-```json
-{
-  "description": "Updated description"
-}
-```
-
-**Response**:
-```json
-{
-  "message": "Policy description updated"
-}
-```
 
 ### PATCH /v1/policy/{policy_id}/bundle
 
@@ -570,8 +637,7 @@ const loadVersionHistory = async () => {
 **Request**:
 ```json
 {
-  "bundle": {...},
-  "description": "Updated bundle via editor"
+  "bundle": {...}
 }
 ```
 
@@ -1082,6 +1148,7 @@ Send the returned `invitation_url` to the invitee (email, Slack, etc.).
 - `key_not_found`: Signing key doesn't exist
 - `policy_not_found`: Policy doesn't exist
 - `account_not_found`: Account doesn't exist
+- `signature_required`: API token publish requires X-D2-Signature and X-D2-Key-Id headers
 
 ### Frontend Error Handling
 

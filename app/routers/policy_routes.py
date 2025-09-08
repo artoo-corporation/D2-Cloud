@@ -17,7 +17,6 @@ from app.models import (
     MessageResponse,
     PolicyBundleResponse,
     PolicyBundleUpdate,
-    PolicyDescriptionUpdate,
     PolicyDraft,
     PolicyPublishResponse,
     PolicyRevertRequest,
@@ -27,7 +26,7 @@ from app.models import (
     PolicyVersionResponse,
 )
 from app.utils.audit import log_audit_event
-from app.utils.database import insert_data, query_one, query_many, update_data
+from app.utils.database import insert_data, query_one, query_many, update_data, query_data
 from app.utils.dependencies import get_supabase_async, require_account_admin
 from app.utils.security_utils import verify_api_token
 from app.utils.utils import normalize_app_name
@@ -309,8 +308,8 @@ async def upload_policy_draft(
 async def publish_policy(
     request: Request,
     app_name: str = Query(..., description="App name being published"),
-    x_d2_signature: str = Header(..., alias="X-D2-Signature"),
-    x_d2_key_id: str = Header(..., alias="X-D2-Key-Id"),
+    x_d2_signature: str | None = Header(None, alias="X-D2-Signature"),
+    x_d2_key_id: str | None = Header(None, alias="X-D2-Key-Id"),
     if_match: str | None = Header(None, alias="If-Match"),
     auth: AuthContext = Depends(require_scope("policy.publish")),
     supabase=Depends(get_supabase_async),
@@ -379,50 +378,69 @@ async def publish_policy(
     updated_bundle, policy_expiry = extract_and_sync_policy_expiry(draft_row["bundle"])
 
     # ------------------------------------------------------------------
-    # Signature verification (Ed25519)
+    # Signature verification (Ed25519) - Optional for Supabase users
     # ------------------------------------------------------------------
-    key_row = await query_one(
-        supabase,
-        "public_keys",
-        match={"account_id": auth.account_id, "key_id": x_d2_key_id},
-    )
-
-    if not key_row:
-        logger.error(f"Key not found for account {auth.account_id}, key_id={x_d2_key_id}")
-        raise HTTPException(status_code=404, detail="key_not_found")
-    if key_row.get("revoked_at") is not None:
-        logger.error(f"Key revoked for account {auth.account_id}, key_id={x_d2_key_id}")
-        raise HTTPException(status_code=403, detail="key_revoked")
-
-    public_key_raw = key_row["public_key"]
-    if isinstance(public_key_raw, str):
-        # Handle hex format from PostgREST bytea (e.g., "\\x9f4c...")
-        if public_key_raw.startswith("\\x"):
-            try:
-                public_key_bytes = bytes.fromhex(public_key_raw[2:])
-            except ValueError as e:
-                logger.error(f"Failed to decode hex public key for account {auth.account_id}: {e}")
-                raise HTTPException(status_code=400, detail="invalid_public_key_format")
-        else:
-            # Handle base64 format
-            try:
-                public_key_bytes = base64.b64decode(public_key_raw)
-            except Exception:
-                public_key_bytes = public_key_raw.encode()
+    
+    # Check if this is a Supabase JWT user (frontend) or API token (CLI/SDK)
+    is_supabase_user = auth.user_id is not None
+    
+    if is_supabase_user:
+        # Frontend user with Supabase JWT - signature verification is optional
+        logger.info(f"Supabase user {auth.user_id} publishing policy - skipping signature verification")
     else:
-        public_key_bytes = public_key_raw
+        # API token user - signature verification is mandatory
+        if not x_d2_signature or not x_d2_key_id:
+            logger.error(f"API token publish requires signature headers for account {auth.account_id}")
+            raise HTTPException(
+                status_code=400, 
+                detail="signature_required",
+                headers={"X-Required-Headers": "X-D2-Signature, X-D2-Key-Id"}
+            )
+        
+        key_row = await query_one(
+            supabase,
+            "public_keys",
+            match={"account_id": auth.account_id, "key_id": x_d2_key_id},
+        )
 
-    try:
-        signature = base64.b64decode(x_d2_signature)
-    except Exception as e:  # noqa: BLE001
-        logger.error(f"Failed to decode signature for account {auth.account_id}: {e}")
-        raise HTTPException(status_code=400, detail="invalid_signature")
+        if not key_row:
+            logger.error(f"Key not found for account {auth.account_id}, key_id={x_d2_key_id}")
+            raise HTTPException(status_code=404, detail="key_not_found")
+        if key_row.get("revoked_at") is not None:
+            logger.error(f"Key revoked for account {auth.account_id}, key_id={x_d2_key_id}")
+            raise HTTPException(status_code=403, detail="key_revoked")
 
-    try:
-        Ed25519PublicKey.from_public_bytes(public_key_bytes).verify(signature, await request.body())
-    except Exception as e:  # noqa: BLE001
-        logger.error(f"Signature verification failed for account {auth.account_id}: {e}")
-        raise HTTPException(status_code=400, detail="invalid_signature")
+        public_key_raw = key_row["public_key"]
+        if isinstance(public_key_raw, str):
+            # Handle hex format from PostgREST bytea (e.g., "\\x9f4c...")
+            if public_key_raw.startswith("\\x"):
+                try:
+                    public_key_bytes = bytes.fromhex(public_key_raw[2:])
+                except ValueError as e:
+                    logger.error(f"Failed to decode hex public key for account {auth.account_id}: {e}")
+                    raise HTTPException(status_code=400, detail="invalid_public_key_format")
+            else:
+                # Handle base64 format
+                try:
+                    public_key_bytes = base64.b64decode(public_key_raw)
+                except Exception:
+                    public_key_bytes = public_key_raw.encode()
+        else:
+            public_key_bytes = public_key_raw
+
+        try:
+            signature = base64.b64decode(x_d2_signature)
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Failed to decode signature for account {auth.account_id}: {e}")
+            raise HTTPException(status_code=400, detail="invalid_signature")
+
+        try:
+            Ed25519PublicKey.from_public_bytes(public_key_bytes).verify(signature, await request.body())
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Signature verification failed for account {auth.account_id}: {e}")
+            raise HTTPException(status_code=400, detail="invalid_signature")
+        
+        logger.info(f"Ed25519 signature verified successfully for account {auth.account_id}")
 
     # ------------------------------------------------------------------
     # Fetch active RSA key-pair for this tenant
@@ -578,7 +596,7 @@ async def list_policy_versions(
     if app_name:
         match_filters["app_name"] = app_name
 
-    select_fields = "id,version,active,published_at,expires,revocation_time,app_name,description"
+    select_fields = "id,version,active,published_at,expires,revocation_time,app_name"
     if include_bundle:
         select_fields += ",bundle"
 
@@ -711,7 +729,7 @@ async def list_policies(
         POLICY_TABLE,
         match={"account_id": auth.account_id},
         order_by=("created_at", "desc"),
-        select_fields="id,app_name,version,description,active,is_draft,published_at,expires,revocation_time,is_revoked,bundle",
+        select_fields="id,app_name,version,active,is_draft,published_at,expires,revocation_time,is_revoked,bundle",
     )
     return [PolicySummary(**r) for r in rows]
 
@@ -733,53 +751,6 @@ async def get_policy_detail(
     return PolicySummary(**row)
 
 
-# ---------------------------------------------------------------------------
-# Update description
-# ---------------------------------------------------------------------------
-
-
-@router.patch("/{policy_id}/description", response_model=MessageResponse)
-async def update_policy_description(
-    http_request: Request,
-    policy_id: str,
-    payload: PolicyDescriptionUpdate,
-    auth: AuthContext = Depends(require_scope("policy.publish")),
-    supabase=Depends(get_supabase_async),
-):
-    """Update the free-text description of a draft or published policy.
-
-    Only the owner account can update; requires `policy.publish` or higher
-    scope (dev/server/admin roles).
-    """
-
-    # Ensure policy belongs to caller
-    policy_row = await query_one(
-        supabase,
-        POLICY_TABLE,
-        match={"id": policy_id, "account_id": auth.account_id},
-    )
-    if not policy_row:
-        raise HTTPException(status_code=404, detail="policy_not_found")
-
-    await update_data(
-        supabase,
-        POLICY_TABLE,
-        keys={"id": policy_id},
-        values={"description": payload.description},
-    )
-
-    # Audit log policy description update with user attribution
-    await log_audit_event(
-        supabase,
-        action=AuditAction.policy_update,
-        actor_id=auth.account_id,
-        status=AuditStatus.success,
-        token_id=getattr(http_request.state, "token_id", None),
-        user_id=getattr(http_request.state, "user_id", None),
-        version=policy_row.get("version"),
-    )
-
-    return MessageResponse(message="description_updated")
 
 
 @router.patch("/{policy_id}/bundle", response_model=MessageResponse)
@@ -821,8 +792,6 @@ async def update_policy_bundle(
 
     # Update values
     update_values = {"bundle": payload.bundle}
-    if payload.description is not None:
-        update_values["description"] = payload.description
 
     await update_data(
         supabase,

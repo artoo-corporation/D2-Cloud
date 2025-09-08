@@ -159,7 +159,6 @@ class PolicyVersionResponse(BaseModel):
     expires: Optional[datetime] = Field(None, description="When this policy expires")
     revocation_time: Optional[datetime] = Field(None, description="When this version was revoked")
     app_name: str = Field(..., description="App name for this policy")
-    description: Optional[str] = Field(None, description="Policy description")
     bundle: Optional[Dict[str, Any]] = Field(None, description="Policy bundle content (for comparison)")
     published_by: Optional[str] = Field(None, description="Name of user who published this version")
 
@@ -275,14 +274,10 @@ globals().update(_globals_update)
 __all__: list[str] = list(_globals_update.keys()) 
 
 
-class PolicyDescriptionUpdate(BaseModel):
-    """Payload for updating a policy description from the dashboard."""
-    description: str = Field(..., max_length=1024)
 
 class PolicyBundleUpdate(BaseModel):
     """Payload for updating a policy bundle content from the editor."""
     bundle: Dict[str, Any] = Field(..., description="Updated policy bundle content")
-    description: Optional[str] = Field(None, max_length=1024, description="Optional description update")
 
 class PolicyValidationRequest(BaseModel):
     """Request for validating a policy bundle in the editor."""
@@ -300,7 +295,6 @@ class PolicySummary(BaseModel):
     id: str
     app_name: str
     version: int
-    description: str | None = None
     active: bool
     is_draft: bool
     published_at: datetime | None = None

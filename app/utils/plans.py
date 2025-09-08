@@ -16,6 +16,7 @@ from typing import Dict, Any
 PLANS: Dict[str, Dict[str, Any]] = {
     "free": { # $0
         "max_tools": 5,
+        "max_apps": 1,
         "min_poll": 300,
         "ingest_interval": 60,
         "max_batch_bytes": 32 * 1024,  # 32 KiB (events)
@@ -23,6 +24,7 @@ PLANS: Dict[str, Dict[str, Any]] = {
     },
     "essentials": { # $99
         "max_tools": 25,
+        "max_apps": 5,
         "min_poll": 60,
         "ingest_interval": 60,
         "max_batch_bytes": 128 * 1024,
@@ -30,6 +32,7 @@ PLANS: Dict[str, Dict[str, Any]] = {
     },
     "pro": { # $250
         "max_tools": 250,
+        "max_apps": 25,
         "min_poll": 30,
         "ingest_interval": 30,
         "max_batch_bytes": 512 * 1024,
@@ -37,6 +40,7 @@ PLANS: Dict[str, Dict[str, Any]] = {
     },
     "enterprise": { # $CUSTOM
         "max_tools": 1000,
+        "max_apps": 1,
         "min_poll": 10,
         "ingest_interval": 10,
         "max_batch_bytes": 1024 * 1024,
@@ -44,6 +48,7 @@ PLANS: Dict[str, Dict[str, Any]] = {
     },
     "locked": {
         "max_tools": 0,
+        "max_apps": 0,
         "min_poll": 100000,
         "ingest_interval": 60,  # disallow ingest
         "max_batch_bytes": 32 * 1024,

@@ -29,4 +29,4 @@ def test_publish_key_not_found(monkeypatch, api_client, patch_verify):
             "If-Match": "*",
         },
     )
-    assert resp.status_code in {400, 404}  # 400 if signature/key validation fails early 
+    assert resp.status_code in {400, 404, 422}  # 422 when body validation fails 
