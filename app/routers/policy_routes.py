@@ -378,6 +378,41 @@ async def publish_policy(
     updated_bundle, policy_expiry = extract_and_sync_policy_expiry(draft_row["bundle"])
 
     # ------------------------------------------------------------------
+    # App quota enforcement
+    # ------------------------------------------------------------------
+    
+    # Get account and plan information for quota enforcement
+    account = await query_one(supabase, "accounts", match={"id": auth.account_id})
+    plan_name = effective_plan(account)
+    max_apps = get_plan_limit(plan_name, "max_apps")
+    
+    # Check existing PUBLISHED apps for this account (drafts don't count toward quota)
+    resp_apps = await query_data(
+        supabase,
+        POLICY_TABLE,
+        filters={"account_id": auth.account_id, "is_draft": False},
+        select_fields="app_name",
+    )
+    # Use set to get unique published app names
+    existing_published_apps = {row["app_name"] for row in (resp_apps.data or []) if row["app_name"]}
+    
+    logger.info(f"App quota check - Account: {auth.account_id}, Plan: {plan_name}, Max apps: {max_apps}")
+    logger.info(f"Current app being published: {app_name}")
+    logger.info(f"Existing published apps: {existing_published_apps}")
+    logger.info(f"Published app count: {len(existing_published_apps)}")
+    
+    # If this is a brand-new app (not previously published), enforce quota
+    if app_name not in existing_published_apps and len(existing_published_apps) >= max_apps:
+        logger.error(f"App quota exceeded for account {auth.account_id}: {len(existing_published_apps)}/{max_apps}")
+        logger.error(f"Attempting to publish new app '{app_name}' but quota is full")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="quota_apps_exceeded",
+        )
+    
+    logger.info(f"App quota check passed for account {auth.account_id}: {len(existing_published_apps)}/{max_apps}")
+
+    # ------------------------------------------------------------------
     # Signature verification (Ed25519) - Optional for Supabase users
     # ------------------------------------------------------------------
     
@@ -506,8 +541,6 @@ async def publish_policy(
     etag = sha256(jws.encode()).hexdigest()
 
     # Determine poll-seconds (account-level override or default by plan)
-    account = await query_one(supabase, "accounts", match={"id": auth.account_id})
-    plan_name = effective_plan(account)
     plan_min_poll = get_plan_limit(plan_name, "min_poll", 60)
     acct_override = (account or {}).get("poll_seconds")
     if acct_override is not None:
