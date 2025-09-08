@@ -21,9 +21,11 @@ Policy publishing returns JWS format for all authentication methods:
 - `owner` role is immutable and assigned automatically to first user
 
 ### 📱 App Quota System
-Plan-based limits on the number of applications per account:
+Plan-based limits on the number of **published** applications per account:
 - **Free**: 1 app, **Essentials**: 5 apps, **Pro**: 25 apps, **Enterprise**: 1000 apps
-- Quota enforced during policy publishing (not drafting)
+- **Drafts are unlimited** - create as many draft policies as needed for any app
+- **Quota enforced only during publishing** - when publishing a draft for a **new app name** that has never been published before
+- **Updates allowed** - republishing/updating existing published apps doesn't count against quota
 - Clear error messages and SDK guidance for quota exceeded scenarios
 
 ### 🔐 Frontend Policy Publishing
@@ -294,16 +296,21 @@ const createToken = async (data) => {
 - **Server tokens**: Plan-based limits (30-300s for production)
 
 ### 🔢 App Quota (NEW 2025-09-08)
-Each subscription plan now limits the number of *apps* (unique `app_name` values) per account:
+Each subscription plan limits the number of **published** apps (unique `app_name` values with published policies) per account:
 
-| Plan | Max Apps |
-|------|----------|
+| Plan | Max Published Apps |
+|------|-------------------|
 | Free | 1 |
 | Essentials | 5 |
 | Pro | 25 |
 | Enterprise | 1000 |
 
-Attempting to **publish** a policy for a *new* app beyond the limit returns:
+**Important Quota Rules**:
+- **Drafts are unlimited** - create as many draft policies as needed for any app name
+- **Quota applies only to new published apps** - when publishing a draft for an app name that has never been published before
+- **Updates are always allowed** - republishing or updating existing published apps doesn't count against quota
+
+Attempting to **publish** a policy for a *brand new app* beyond the limit returns:
 
 ```json
 {
@@ -326,20 +333,25 @@ curl -H "Authorization: Bearer d2_server_token" \
 
 ### 🤖 SDK Guidance: Handling `quota_apps_exceeded`
 
-When the SDK uploads a *new* policy bundle (or publishes a draft) it may receive a
+When the SDK publishes a draft for a **brand new app name** (that has never been published before) it may receive a quota error:
 
 ```http
 HTTP/1.1 403 Forbidden
 
 {
   "detail": "quota_apps_exceeded",
-  "message": "Your plan allows 5 apps; please upgrade to create more."
+  "message": "Your plan allows 5 published apps; please upgrade to create more."
 }
 ```
 
+**Important Notes**:
+- **Drafts never trigger quota errors** - unlimited drafts are allowed
+- **Updates never trigger quota errors** - republishing existing apps is always allowed
+- **Only new published apps count** - first-time publishing of a new app name
+
 The SDK (or CI script) **MUST** interpret this as a *non-retryable* error:
 
-1. **Stop automatic retries** – further attempts will always fail until the plan is upgraded or an old app is deleted.
+1. **Stop automatic retries** – further attempts will always fail until the plan is upgraded or an old published app is deleted.
 2. **Surface actionable feedback** – bubble up the human-readable message so developers know why the publish failed.
 3. **Optional** – call `/v1/accounts/me` to fetch `quotas.max_apps` and display current usage vs. limit.
 
@@ -360,8 +372,9 @@ async function publishPolicy(appName: string, token: string) {
     const err = await resp.json();
     if (err.detail === 'quota_apps_exceeded') {
       throw new Error(
-        `Plan limit reached: ${err.message}. ` +
-        'Upgrade your plan or delete unused apps.'
+        `Published app limit reached: ${err.message}. ` +
+        'Upgrade your plan or delete unused published apps. ' +
+        'Note: Drafts are unlimited, only new published apps count.'
       );
     }
   }
