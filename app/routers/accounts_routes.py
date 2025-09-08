@@ -8,7 +8,7 @@ via POST /v1/accounts/{account_id}/tokens (see tokens_routes.py).
 """
 
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Path, HTTPException, status
 
 from app.utils.dependencies import get_supabase_async
 
@@ -72,4 +72,88 @@ async def get_me(
         quotas=quotas,
         metrics_enabled=account.get("metrics_enabled", False),
         poll_seconds=quotas["poll_sec"],
-    ) 
+    )
+
+# ---------------------------------------------------------------------------
+# User role management – promote / demote users (admin-only)
+# ---------------------------------------------------------------------------
+
+from pydantic import BaseModel, Field
+from app.models.invitations import InvitationRole
+from app.utils.dependencies import require_actor_admin, Actor
+from app.utils.database import update_data, query_one
+from app.models import MessageResponse, AuditAction, AuditStatus
+from app.utils.audit import log_audit_event
+
+
+class UserRoleUpdateRequest(BaseModel):
+    """Request body to change a user's role within the account."""
+
+    role: InvitationRole = Field(..., description="New role for the user")
+
+    # Restrict allowed roles – cannot assign owner via API
+    @classmethod
+    def __get_validators__(cls):
+        yield cls.validate_role
+
+    @classmethod
+    def validate_role(cls, v: InvitationRole):  # noqa: D401
+        if v not in {InvitationRole.admin, InvitationRole.dev, InvitationRole.member}:
+            raise ValueError("Role must be admin, dev or member")
+        return v
+
+
+@router.patch("/{account_id}/users/{user_id}/role", response_model=MessageResponse)
+async def update_user_role(
+    account_id: str = Path(..., description="Account ID"),
+    user_id: str = Path(..., description="User ID whose role is being updated"),
+    request: UserRoleUpdateRequest = ...,
+    actor: Actor = Depends(require_actor_admin),
+    supabase=Depends(get_supabase_async),
+):
+    """Update the role of an existing user in the account.
+
+    Only account admins can modify roles. *owner* role cannot be assigned via this
+    endpoint to safeguard against privilege escalation.
+    """
+
+    # Enforce Supabase session and account match
+    if actor.user_id is None:
+        raise HTTPException(status_code=403, detail="supabase_session_required")
+    if actor.account_id != account_id:
+        raise HTTPException(status_code=403, detail="account_mismatch")
+
+    # Make sure target user exists in this account
+    target_user = await query_one(
+        supabase,
+        "users",
+        match={"user_id": user_id, "account_id": account_id},
+    )
+    if not target_user:
+        raise HTTPException(status_code=404, detail="user_not_found")
+
+    # Disallow changing owner role via API
+    if target_user.get("role") == InvitationRole.owner.value:
+        raise HTTPException(status_code=400, detail="cannot_modify_owner")
+    if request.role == InvitationRole.owner:
+        raise HTTPException(status_code=400, detail="cannot_assign_owner")
+
+    # Update role
+    await update_data(
+        supabase,
+        "users",
+        {"user_id": user_id},
+        {"role": request.role.value},
+    )
+
+    # Audit log
+    await log_audit_event(
+        supabase,
+        action=AuditAction.user_role_update,
+        actor_id=account_id,
+        status=AuditStatus.success,
+        user_id=actor.user_id,
+        metadata={"target_user_id": user_id, "new_role": request.role.value},
+    )
+
+    return MessageResponse(message="role_updated") 

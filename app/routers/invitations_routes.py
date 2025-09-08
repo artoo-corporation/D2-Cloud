@@ -5,6 +5,7 @@ from __future__ import annotations
 import secrets
 from datetime import datetime, timezone, timedelta
 from uuid import uuid4
+import os
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 
@@ -16,6 +17,7 @@ from app.models.invitations import (
     InvitationListResponse,
     PendingInvitationInfo,
     InvitationRole,
+    InvitationCreateResponse,
 )
 from app.utils.audit import log_audit_event
 from app.utils.dependencies import get_supabase_async, require_actor_admin, Actor
@@ -31,7 +33,7 @@ async def _generate_invitation_token() -> str:
 
 @router.post(
     "",
-    response_model=MessageResponse,
+    response_model=InvitationCreateResponse,
     status_code=status.HTTP_201_CREATED,
 )
 async def create_invitation(
@@ -99,10 +101,17 @@ async def create_invitation(
         metadata={"invited_email": request.email, "role": request.role.value}
     )
     
-    # TODO: Send invitation email with token
-    # This would integrate with your email service (SendGrid, etc.)
-    
-    return MessageResponse(message=f"invitation_sent_to_{request.email}")
+    # Build URL for front-end (first allowed origin from settings or env)
+    from app import settings
+    base_url = os.getenv("FRONTEND_ORIGIN") or settings.ALLOWED_ORIGINS[0]
+    invitation_url = f"{base_url.rstrip('/')}/accept?token={invitation_token}"
+
+    # TODO: send email with invitation_url
+
+    return InvitationCreateResponse(
+        message=f"invitation_sent_to_{request.email}",
+        invitation_url=invitation_url,
+    )
 
 
 @router.get("", response_model=InvitationListResponse)

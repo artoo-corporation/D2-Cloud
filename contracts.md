@@ -907,31 +907,31 @@ X-Next-Cursor: "2024-01-01T11:59:59Z,uuid"
 
 ## 🏢 Multi-Tenancy (Invitations)
 
-### POST /v1/invitations
+### POST /v1/accounts/{account_id}/invitations
 
-**Purpose**: Invite user to organization
+**Purpose**: Invite a user to the organisation
 
-**Auth**: Supabase JWT (admin role)
+**Auth**: Supabase JWT (`role` = `admin` **or** `owner`)
+
+**Role Choices** *(updated 2025-09-08)*:
+`admin`, `dev` — other roles cannot be assigned via invitation.
 
 **Request**:
 ```json
 {
-  "email": "newuser@example.com",
-  "role": "member"
+  "email": "dev@example.com",
+  "role": "dev"  // or "admin"
 }
 ```
 
-**Response**:
+**Response** *(model `InvitationCreateResponse`)*:
 ```json
 {
-  "id": "uuid",
-  "email": "newuser@example.com",
-  "role": "member",
-  "invitation_token": "secure_token",
-  "expires_at": "2024-01-08T00:00:00Z",
-  "created_at": "2024-01-01T00:00:00Z"
+  "message": "invitation_sent_to_dev@example.com",
+  "invitation_url": "https://d2.artoo.love/accept?token=inv_abc123..."
 }
 ```
+Send the returned `invitation_url` to the invitee (email, Slack, etc.).
 
 ### GET /v1/invitations
 
@@ -996,6 +996,30 @@ X-Next-Cursor: "2024-01-01T11:59:59Z,uuid"
 ```json
 {
   "message": "Invitation accepted successfully"
+}
+```
+
+### PATCH /v1/accounts/{account_id}/users/{user_id}/role *(NEW 2025-09-08)*
+
+**Purpose**: Promote or demote an existing user (admin/owner only)
+
+**Auth**: Supabase JWT (`admin` or `owner`)
+
+**Request**:
+```json
+{
+  "role": "admin"   // "admin", "dev", or "member"
+}
+```
+
+**Constraints**:
+- Cannot assign or modify the `owner` role via API.
+- Cannot modify users outside the caller’s account (`account_mismatch` error).
+
+**Response**:
+```json
+{
+  "message": "role_updated"
 }
 ```
 

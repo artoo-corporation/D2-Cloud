@@ -104,7 +104,10 @@ class AuditAction(str, Enum):
     context_actor_override = "context.actor_override"
     thread_entrypoint = "thread.entrypoint"
     context_no_context_error = "context.no_context_error"
-    
+
+    # User operations
+    user_role_update = "user.role_update"
+
     # Invitation operations
     invitation_create = "invitation.create"
     invitation_accept = "invitation.accept"

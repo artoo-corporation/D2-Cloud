@@ -13,20 +13,33 @@ class InvitationRole(str, Enum):
     """Roles that can be assigned to invited users."""
     owner = "owner"      # Full admin access (cannot be invited, only original creator)
     admin = "admin"      # Can manage users, tokens, policies
-    member = "member"    # Can view and use tokens/policies
+    dev = "dev"          # Developer role with limited admin capabilities
+    member = "member"    # General member (currently not assignable via invitation)
 
 
 class InvitationCreateRequest(BaseModel):
-    """Request model for creating a new invitation."""
+    """Request model for creating a new invitation.
+
+    Only *admin* or *dev* roles are permitted via invitation.  Other roles
+    (e.g. *owner*, *member*) must be set by internal workflows and are therefore
+    rejected by validation.
+    """
+
     email: str = Field(..., description="Email address to invite")
-    role: InvitationRole = Field(default=InvitationRole.member, description="Role to assign")
-    
+    role: InvitationRole = Field(default=InvitationRole.dev, description="Role to assign")
+
     @validator("email")
     def validate_email(cls, v):
         """Basic email validation."""
         if "@" not in v or "." not in v.split("@")[-1]:
             raise ValueError("Invalid email format")
         return v.lower().strip()
+
+    @validator("role")
+    def validate_role(cls, v: InvitationRole):  # noqa: D401
+        if v not in {InvitationRole.admin, InvitationRole.dev}:
+            raise ValueError("Role must be 'admin' or 'dev'")
+        return v
 
 
 class InvitationResponse(BaseModel):
@@ -48,6 +61,20 @@ class InvitationAcceptRequest(BaseModel):
 class InvitationListResponse(BaseModel):
     """Response model for listing account invitations."""
     invitations: list[InvitationResponse] = Field(..., description="List of invitations")
+
+
+# ---------------------------------------------------------------------------
+# Create invitation response (includes front-end URL)
+# ---------------------------------------------------------------------------
+
+
+class InvitationCreateResponse(BaseModel):
+    """Returned by POST /invitations – contains the link the invitee should
+    visit to accept the invitation.
+    """
+
+    message: str = Field(..., example="invitation_sent")
+    invitation_url: str = Field(..., description="Fully-qualified URL that the frontend should send to the invitee")
 
 
 class PendingInvitationInfo(BaseModel):
