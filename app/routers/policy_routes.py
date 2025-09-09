@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from hashlib import sha256
 from typing import Any
 
@@ -36,7 +36,7 @@ from app.utils.require_scope import require_scope
 from app.utils.logger import logger
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from app.utils.policy_expiry import is_policy_expired, extract_and_sync_policy_expiry
-from app.utils.policy_validation import validate_d2_policy_bundle, get_policy_summary, extract_app_name
+from app.utils.policy_validation import validate_d2_policy_bundle, get_policy_summary, extract_app_name, validate_strict_policy_requirements, enforce_server_side_expiry
 from app.utils.security_utils import decrypt_private_jwk, create_enhanced_jws
 
 router = APIRouter(prefix="/v1/policy", tags=["policy"])
@@ -126,10 +126,44 @@ async def get_policy_bundle(
         if isinstance(policy_expires, str):
             policy_expires = datetime.fromisoformat(policy_expires).astimezone(timezone.utc)
         
-        # Check if policy is expired (just log for monitoring)
+        # Check if policy is expired and auto-refresh if needed
         if is_policy_expired(policy_expires):
             logger.warning(f"Policy expired for account {auth.account_id}: {policy_expires}")
-            # Expiry is automatically handled during upload/publish
+            
+            # Auto-refresh: extend expiry by 1 week from now
+            new_expiry = datetime.now(timezone.utc) + timedelta(weeks=1)
+            new_expiry_str = new_expiry.isoformat()
+            
+            logger.info(f"Auto-refreshing expired policy for account {auth.account_id}: {policy_expires} -> {new_expiry_str}")
+            
+            # Update the policy in database with new expiry
+            await update_data(
+                supabase,
+                POLICY_TABLE,
+                keys={"id": row["id"]},
+                values={"expires": new_expiry_str}
+            )
+            
+            # Also update the bundle metadata to keep it in sync
+            if row.get("bundle") and isinstance(row["bundle"], dict):
+                updated_bundle = row["bundle"].copy()
+                if "metadata" not in updated_bundle:
+                    updated_bundle["metadata"] = {}
+                updated_bundle["metadata"]["expires"] = new_expiry_str
+                
+                # Update bundle in database too
+                await update_data(
+                    supabase,
+                    POLICY_TABLE,
+                    keys={"id": row["id"]},
+                    values={"bundle": updated_bundle}
+                )
+                
+                # Update our row data for response
+                row["bundle"] = updated_bundle
+            
+            # Update expires field in our row data for response
+            row["expires"] = new_expiry_str
 
     # 3️⃣  Ensure we actually found a policy row (defence-in-depth – should already be guaranteed)
     if not row or "jws" not in row:
@@ -205,18 +239,26 @@ async def upload_policy_draft(
 ):
     logger.info(f"Draft upload for account {auth.account_id}")
 
-    # Validate D2 policy bundle format
+    # Strict validation for required fields
     try:
-        is_valid, validation_errors = validate_d2_policy_bundle(draft.bundle, strict=False)
-        if not is_valid:
-            logger.warning(f"Policy validation warnings for account {auth.account_id}: {validation_errors}")
-        
-        # Log policy summary for debugging
-        policy_summary = get_policy_summary(draft.bundle)
+        validate_strict_policy_requirements(draft.bundle)
+        logger.info(f"Strict policy validation passed for account {auth.account_id}")
+    except Exception as e:
+        logger.error(f"Policy validation failed for account {auth.account_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"policy_validation_failed: {str(e)}"
+        )
+
+    # Enforce server-side expiry (1 week from now, ignoring client input)
+    bundle_with_server_expiry = enforce_server_side_expiry(draft.bundle)
+    
+    # Log policy summary for debugging
+    try:
+        policy_summary = get_policy_summary(bundle_with_server_expiry)
         logger.info(f"Policy summary for account {auth.account_id}: {policy_summary}")
     except Exception as e:
-        logger.error(f"Policy validation error for account {auth.account_id}: {e}")
-        # Continue anyway - validation is informational for now
+        logger.warning(f"Error generating policy summary for account {auth.account_id}: {e}")
 
     # Auto-generate next draft version
     # Check highest version across both drafts and published policies
@@ -242,17 +284,14 @@ async def upload_policy_draft(
     published_version = latest_published["version"] if latest_published else 0
     next_version = max(draft_version, published_version) + 1
     
-    # Extract app name from bundle metadata
-    app_name = normalize_app_name(extract_app_name(draft.bundle))
+    # Extract app name from bundle metadata (using server-side bundle)
+    app_name = normalize_app_name(extract_app_name(bundle_with_server_expiry))
     logger.info(f"Extracted app name: {app_name} for account {auth.account_id}")
     
-    # Extract and sync expiry information from the policy bundle
-    # Auto-extend if expired
-    updated_bundle, policy_expiry = extract_and_sync_policy_expiry(draft.bundle)
-    logger.info(f"Final policy expiry after sync: {policy_expiry} for account {auth.account_id}")
-    
-    # Convert datetime to ISO string for database storage
-    policy_expiry_str = policy_expiry.isoformat() if policy_expiry else None
+    # Use the bundle with server-side expiry (no client-side expiry processing)
+    updated_bundle = bundle_with_server_expiry
+    policy_expiry_str = updated_bundle["metadata"]["expires"]
+    logger.info(f"Server-side policy expiry: {policy_expiry_str} for account {auth.account_id}")
     
     # Prepare update values with synchronized bundle
     update_values = {
@@ -372,10 +411,24 @@ async def publish_policy(
     logger.info(f"Latest version: {latest_version}")
     new_version = latest_version + 1
     # ------------------------------------------------------------------
-    # Sync expiry field inside bundle (auto-extend if needed)
+    # Strict validation and server-side expiry enforcement
     # ------------------------------------------------------------------
+    
+    # Strict validation for required fields
+    try:
+        validate_strict_policy_requirements(draft_row["bundle"])
+        logger.info(f"Strict policy validation passed for account {auth.account_id}")
+    except Exception as e:
+        logger.error(f"Policy validation failed during publish for account {auth.account_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"policy_validation_failed: {str(e)}"
+        )
 
-    updated_bundle, policy_expiry = extract_and_sync_policy_expiry(draft_row["bundle"])
+    # Enforce server-side expiry (1 week from now, ignoring any existing expiry)
+    updated_bundle = enforce_server_side_expiry(draft_row["bundle"])
+    policy_expiry_str = updated_bundle["metadata"]["expires"]
+    logger.info(f"Server-side policy expiry enforced during publish: {policy_expiry_str} for account {auth.account_id}")
 
     # ------------------------------------------------------------------
     # App quota enforcement
@@ -502,8 +555,7 @@ async def publish_policy(
         audience=f"d2-policy:{auth.account_id}:{app_name}",  # Specific audience for this policy
     )
     
-    # Convert datetime to ISO string for database storage
-    policy_expiry_str = policy_expiry.isoformat() if policy_expiry else None
+    # policy_expiry_str already set from server-side enforcement above
 
     # First, deactivate any currently active policy for this account
     if latest_published:

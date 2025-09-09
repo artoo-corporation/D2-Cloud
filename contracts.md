@@ -38,6 +38,12 @@ Plan-based limits on the number of **published** applications per account:
 - Policy descriptions now managed via `bundle.metadata.description`
 - Cleaner separation of concerns between policy content and metadata
 
+### ⏰ Auto-Refresh Policy Expiry
+- **Server-side expiry enforcement**: All policies get 1-week expiry from submission time
+- **Auto-refresh on access**: Expired policies are automatically extended by 1 week when accessed via GET /bundle
+- **Seamless operation**: SDKs continue working without interruption when policies expire
+- **Consistent behavior**: Both drafts and published policies follow the same expiry rules
+
 ## Authentication
 
 All API endpoints (except public ones) require authentication via Bearer tokens:
@@ -273,6 +279,12 @@ const createToken = async (data) => {
 }
 ```
 
+**Auto-Refresh Behavior** *(NEW 2025-09-08)*:
+- **Expired policies are automatically refreshed** when accessed
+- If a policy has expired, the server extends the expiry by 1 week from the current time
+- This happens transparently - SDKs receive the policy without interruption
+- The refreshed expiry is persisted in the database for future requests
+
 **Response** (Draft):
 ```json
 {
@@ -389,40 +401,67 @@ Including this logic ensures CI pipelines fail fast with a clear reason instead 
 
 ### PUT /v1/policy/draft
 
-**Purpose**: Upload/update policy draft
+**Purpose**: Upload/update policy draft with strict validation
 
 **Auth**: `policy.publish` scope
 
-**Request**:
+**Request** *(Updated 2025-09-08 - Strict Validation)*:
 ```json
 {
   "bundle": {
     "metadata": {
-      "name": "my-app",
-      "version": "1.2.0",
-      "description": "Added new resource permissions"
+      "name": "my-app"  // REQUIRED - app name, non-empty
+      // "expires" ignored - server generates 1-week expiry
     },
-    "policies": [
+    "policies": [  // REQUIRED - at least one policy
       {
-        "name": "resource_access",
-        "rules": [...]
+        "role": "user",           // REQUIRED - non-empty string
+        "permissions": ["read"]   // REQUIRED - at least one permission
       }
-    ],
-    "expiry": "2024-12-31T23:59:59Z"
+    ]
   }
 }
 ```
 
-**Response**:
+**Validation Rules** *(NEW 2025-09-08)*:
+- ✅ **metadata.name required** - Cannot be empty or missing (this is the app name)
+- ✅ **At least one policy required** - policies array cannot be empty
+- ✅ **Each policy must have a role** - Non-empty string required
+- ✅ **Each policy must have permissions** - At least one permission required
+- ✅ **Server-side expiry** - Any client expiry is ignored, server sets 1 week from now
+
+**Success Response**:
 ```json
 {
   "message": "Draft policy uploaded for 'my-app' (v6)"
 }
 ```
 
+**Validation Error Response** *(400 Bad Request)*:
+```json
+{
+  "detail": "policy_validation_failed: Missing required 'metadata.name' field (app name)"
+}
+```
+
+**Common Validation Errors**:
+```json
+// Missing app name
+{"detail": "policy_validation_failed: Missing required 'metadata.name' field (app name)"}
+
+// Missing role
+{"detail": "policy_validation_failed: policies[0] missing required 'role' field"}
+
+// Empty permissions
+{"detail": "policy_validation_failed: policies[0].permissions must contain at least one permission"}
+
+// No policies
+{"detail": "policy_validation_failed: Missing required 'policies' section"}
+```
+
 **Frontend Usage**:
 ```typescript
-// Policy editor save
+// Policy editor save with validation error handling
 const saveDraft = async (bundleContent) => {
   const response = await fetch('/v1/policy/draft', {
     method: 'PUT',
@@ -437,13 +476,36 @@ const saveDraft = async (bundleContent) => {
   
   if (response.ok) {
     showSuccessMessage("Draft saved");
+  } else if (response.status === 400) {
+    const error = await response.json();
+    if (error.detail?.startsWith('policy_validation_failed:')) {
+      const validationMessage = error.detail.replace('policy_validation_failed: ', '');
+      showValidationError(`Policy validation failed: ${validationMessage}`);
+    } else {
+      showGenericError("Failed to save draft");
+    }
   }
+};
+
+// Example validation error handling
+const handleValidationError = (errorDetail) => {
+  const errors = errorDetail.replace('policy_validation_failed: Policy validation failed: ', '').split('; ');
+  
+  errors.forEach(error => {
+    if (error.includes("metadata.name")) {
+      highlightField("app-name", "App name is required");
+    } else if (error.includes("missing required 'role'")) {
+      highlightField("policy-role", "Each policy must have a role");
+    } else if (error.includes("permissions must contain at least one")) {
+      highlightField("policy-permissions", "Each policy must have at least one permission");
+    }
+  });
 };
 ```
 
 ### POST /v1/policy/publish
 
-**Purpose**: Publish draft policy 
+**Purpose**: Publish draft policy with strict validation
 
 **Auth**: `policy.publish` scope
 
@@ -484,6 +546,11 @@ curl -X POST "/v1/policy/publish?app_name=my-app" \
   "version": 6
 }
 ```
+
+**Validation** *(NEW 2025-09-08)*:
+- **Same strict validation as draft upload** - ensures draft meets all requirements before publishing
+- **Server-side expiry refresh** - generates new 1-week expiry at publish time
+- **400 Bad Request** - if draft fails validation (same error format as draft endpoint)
 
 **Headers**:
 ```http
@@ -1191,7 +1258,13 @@ Send the returned `invitation_url` to the invitee (email, Slack, etc.).
 - `etag_mismatch`: Concurrent modification detected
 - `version_rollback`: Attempting to publish older version
 - `no_draft_found`: No draft to publish
-- `policy_validation_failed`: Invalid policy syntax
+- `policy_validation_failed`: Invalid policy syntax or missing required fields
+
+**Policy Validation Errors** *(NEW 2025-09-08)*:
+- `policy_validation_failed: Missing required 'metadata.name' field (app name)`
+- `policy_validation_failed: policies[0] missing required 'role' field`
+- `policy_validation_failed: policies[0].permissions must contain at least one permission`
+- `policy_validation_failed: Missing required 'policies' section`
 
 **Rate Limiting**:
 - `bundle_poll_rate_limit`: Too frequent policy bundle requests
