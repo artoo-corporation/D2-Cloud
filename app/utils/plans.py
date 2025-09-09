@@ -40,19 +40,19 @@ PLANS: Dict[str, Dict[str, Any]] = {
     },
     "enterprise": { # $CUSTOM
         "max_tools": 1000,
-        "max_apps": 1,
+        "max_apps": 100,
         "min_poll": 10,
         "ingest_interval": 10,
         "max_batch_bytes": 1024 * 1024,
         "max_bundle_bytes": int(20 * 1024 * 1024),  # 20 MiB
     },
     "locked": {
-        "max_tools": 0,
-        "max_apps": 0,
-        "min_poll": 100000,
-        "ingest_interval": 60,  # disallow ingest
-        "max_batch_bytes": 32 * 1024,
-        "max_bundle_bytes": int(0.5 * 1024 * 1024),
+        "max_tools": 5,
+        "max_apps": 1,
+        "min_poll": 300,
+        "ingest_interval": 60,
+        "max_batch_bytes": 32 * 1024,  # 32 KiB (events)
+        "max_bundle_bytes": int(0.5 * 1024 * 1024),  # 0.5 MiB
     },
 }
 
