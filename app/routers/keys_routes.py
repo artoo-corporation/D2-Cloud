@@ -11,7 +11,7 @@ from app.utils.require_scope import require_scope
 
 from app.models import AuditAction, AuditStatus, AuthContext, MessageResponse, PublicKeyAddRequest, PublicKeyResponse, TokenScopeError
 from app.utils.audit import log_audit_event
-from app.utils.dependencies import get_supabase_async, require_token_admin
+from app.utils.dependencies import get_supabase_async, require_token_admin, require_actor_admin
 from app.utils.database import insert_data, update_data, query_data
 
 router = APIRouter(prefix="/v1/keys", tags=["keys"])
@@ -108,13 +108,13 @@ async def revoke_key(
 @router.get("", response_model=list[PublicKeyResponse])
 async def list_keys(
     include_revoked: int = Query(0, ge=0, le=1),
-    auth: AuthContext = Depends(require_scope("key.upload")),
+    actor=Depends(require_actor_admin),  # OAuth users (frontend) can list keys
     supabase=Depends(get_supabase_async),
 ):
     # Build query with user name join (left join to handle NULL user_id from server tokens)
     query = supabase.table(PUBLIC_KEYS_TABLE).select(
         "key_id,algo,public_key,created_at,revoked_at,user_id,users:user_id(display_name,full_name)"
-    ).eq("account_id", auth.account_id)
+    ).eq("account_id", actor.account_id)
     
     if not include_revoked:
         query = query.is_("revoked_at", "null")

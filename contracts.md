@@ -870,9 +870,9 @@ const uploadKey = async (keyId, publicKeyBase64) => {
 
 ### GET /v1/keys
 
-**Purpose**: List uploaded keys with user attribution
+**Purpose**: List uploaded keys with user attribution (for frontend display)
 
-**Auth**: `key.upload` scope (Updated 2025-08-28)
+**Auth**: Supabase JWT (admin or owner role) *(Updated 2025-09-08)*
 
 **Query Parameters**:
 - `include_revoked`: Include revoked keys (0/1)
@@ -895,6 +895,26 @@ const uploadKey = async (keyId, publicKeyBase64) => {
 **New Fields**:
 - `user_id`: ID of user who uploaded the key
 - `uploaded_by_name`: Display name of uploader (for UI attribution)
+
+**Frontend Usage** *(Updated 2025-09-08)*:
+```typescript
+// Frontend can now list all keys for the organization
+const listKeys = async (supabaseJWT: string) => {
+  const response = await fetch('/v1/keys', {
+    headers: {
+      Authorization: `Bearer ${supabaseJWT}`,
+    }
+  });
+  
+  if (response.ok) {
+    const keys = await response.json();
+    // Display keys in UI with uploader attribution
+    keys.forEach(key => {
+      console.log(`Key ${key.key_id} uploaded by ${key.uploaded_by_name}`);
+    });
+  }
+};
+```
 
 ### DELETE /v1/keys/{key_id}
 
