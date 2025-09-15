@@ -3,12 +3,12 @@
   "routes": [{ "src": "/(.*)", "dest": "app/main.py" }],
   "crons": [
     {
-      "path": "/api/cron_key_rotation",
-      "schedule": "0 2 * * *"
+      "path": "/api/cron_event_rollup",
+      "schedule": "0 * * * *"
     },
     {
-      "path": "/api/cron_trial_locker",
-      "schedule": "0 1 * * *"
+      "path": "/api/cron_revoke_enforcer", 
+      "schedule": "*/1 * * * *"
     }
   ]
 }

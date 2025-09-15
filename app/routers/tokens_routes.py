@@ -248,10 +248,10 @@ async def create_server_token(
 @router.get("/tokens", response_model=list[APITokenResponse])
 async def list_tokens(
     account_id: str = Path(...),
-    caller_account: str = Depends(require_token_admin),
+    actor: Actor = Depends(require_actor_admin),
     supabase=Depends(get_supabase_async),
 ):
-    if caller_account != account_id:
+    if actor.account_id != account_id:
         raise HTTPException(status_code=403, detail="account_mismatch")
 
     resp = await query_data(
@@ -337,12 +337,12 @@ async def revoke_token(
 async def rotate_token(
     account_id: str = Path(...),
     token_id: str = Path(..., description="Token ID to rotate"),
-    caller_account: str = Depends(require_token_admin),
+    actor: Actor = Depends(require_actor_admin),
     supabase=Depends(get_supabase_async),
 ):
     """Rotate a token: create new token with same settings, revoke old one."""
     
-    if caller_account != account_id:
+    if actor.account_id != account_id:
         raise HTTPException(status_code=403, detail="account_mismatch")
 
     # Get existing token details
