@@ -113,7 +113,7 @@ async def list_keys(
 ):
     # Build query with user name join (left join to handle NULL user_id from server tokens)
     query = supabase.table(PUBLIC_KEYS_TABLE).select(
-        "key_id,algo,public_key,created_at,revoked_at,user_id,users:user_id(display_name,full_name)"
+        "key_id,algo,public_key,created_at,revoked_at,user_id"
     ).eq("account_id", actor.account_id)
     
     if not include_revoked:
@@ -135,18 +135,14 @@ async def list_keys(
                 # Skip malformed keys
                 continue
         
-        # Extract user name from join
-        user_info = row.get("users")
-        uploaded_by_name = None
-        if user_info:
-            # Prefer display_name, fallback to full_name
-            uploaded_by_name = user_info.get("display_name") or user_info.get("full_name")
-        elif row.get("user_id") is None:
+        # Set uploaded_by_name based on user_id presence
+        if row.get("user_id") is None:
             # Key was uploaded by a server token (no user_id)
             uploaded_by_name = "Server Token"
+        else:
+            # Key was uploaded by a user (could lookup name later if needed)
+            uploaded_by_name = "User"
         
-        # Clean up the row for response model
-        row.pop("users", None)  # Remove the join data
         row["uploaded_by_name"] = uploaded_by_name
         
         result.append(PublicKeyResponse(**row))
