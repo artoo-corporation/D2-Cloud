@@ -1,12 +1,21 @@
 # D2 Cloud API Contracts
 
-*Last updated: 2025-09-08 – includes dual policy publish responses, role management, app quotas, and frontend publishing*
+*Last updated: 2025-09-15 – includes dual policy publish responses, role management, app quotas, frontend publishing, and policy crafting assistance*
 
 ## Overview
 
 This document provides comprehensive API contracts for the D2 Cloud control plane. It's designed to be used by frontend developers and LLMs to understand how to interact with the API correctly.
 
-## Recent Updates (2025-09-08)
+## Recent Updates (2025-09-15)
+
+### 🎯 Policy Crafting Assistance *(NEW 2025-09-15)*
+- **New `/v1/policy/roles-permissions` endpoint**: Extracts all unique roles and permissions from existing policy bundles
+- **Smart suggestions**: Frontend can now suggest previously used roles and permissions in autocomplete dropdowns
+- **Role-permission mappings**: Shows which permissions each role typically has for intelligent suggestions
+- **Template creation**: Enable "create role like existing X" functionality with pre-populated permissions
+- **Consistency checking**: Help users maintain consistent permission patterns across policies
+
+## Previous Updates (2025-09-08)
 
 ### 🔄 Consistent JWS Responses
 Policy publishing returns JWS format for all authentication methods:
@@ -820,6 +829,90 @@ const validatePolicy = async (bundleContent) => {
 ```json
 ["my-app", "api-service", "worker-service"]
 ```
+
+### GET /v1/policy/roles-permissions *(NEW 2025-09-15)*
+
+**Purpose**: Extract all unique roles and permissions from existing policy bundles for UI suggestions
+
+**Auth**: `policy.read` scope
+
+**Response**:
+```json
+{
+  "roles": [
+    "admin",
+    "developer", 
+    "viewer",
+    "custom_role"
+  ],
+  "permissions": [
+    "*",
+    "database:query",
+    "weather_api",
+    "notifications:send",
+    "file:read"
+  ],
+  "role_mappings": {
+    "admin": ["*"],
+    "developer": [
+      "database:query",
+      "weather_api", 
+      "notifications:send"
+    ],
+    "viewer": ["file:read"],
+    "custom_role": ["database:query", "file:read"]
+  }
+}
+```
+
+**Frontend Usage**:
+```typescript
+// Load suggestions for policy editor
+const loadPolicySuggestions = async () => {
+  const suggestions = await fetch('/v1/policy/roles-permissions', {
+    headers: { Authorization: `Bearer ${token}` }
+  }).then(r => r.json());
+  
+  // Populate role dropdown
+  const roleDropdown = suggestions.roles;
+  
+  // When user selects a role, suggest its typical permissions
+  const onRoleSelect = (selectedRole) => {
+    const typicalPermissions = suggestions.role_mappings[selectedRole] || [];
+    suggestPermissions(typicalPermissions);
+  };
+  
+  // Populate permission autocomplete
+  const permissionAutocomplete = suggestions.permissions;
+};
+
+// Smart permission suggestions based on role selection
+const suggestPermissionsForRole = (role, suggestions) => {
+  const commonPermissions = suggestions.role_mappings[role] || [];
+  
+  if (commonPermissions.length > 0) {
+    showSuggestionTooltip(`${role} roles typically have: ${commonPermissions.join(', ')}`);
+    prePopulatePermissions(commonPermissions);
+  }
+};
+
+// Role template creation
+const createRoleTemplate = (existingRole, suggestions) => {
+  const template = {
+    role: `${existingRole}_copy`,
+    permissions: suggestions.role_mappings[existingRole] || []
+  };
+  
+  return template;
+};
+```
+
+**Use Cases**:
+- **Autocomplete dropdowns**: Populate role and permission fields with previously used values
+- **Smart suggestions**: When user selects "admin" role, auto-suggest "*" permission
+- **Consistency checking**: Warn if user gives admin role limited permissions (usually gets "*")
+- **Template creation**: "Create role like existing 'developer'" → pre-fill with developer permissions
+- **Pattern recognition**: Show most common permission combinations for each role type
 
 ---
 

@@ -822,6 +822,82 @@ async def list_policies(
     return [PolicySummary(**r) for r in rows]
 
 
+@router.get("/roles-permissions")
+async def list_roles_and_permissions(
+    auth: AuthContext = Depends(require_scope("policy.read")),
+    supabase=Depends(get_supabase_async),
+):
+    """Extract all unique roles and permissions from policy bundles for UI suggestions.
+    
+    Returns roles, permissions, and role-to-permission mappings from all policy bundles
+    (both draft and published) for this account.
+    
+    Useful for frontend autocomplete/dropdown suggestions when crafting new policies.
+    """
+    
+    # Fetch all policy bundles for this account (both draft and published)
+    rows = await query_many(
+        supabase,
+        POLICY_TABLE,
+        match={"account_id": auth.account_id},
+        select_fields="bundle",
+    )
+    
+    # Use sets to automatically handle uniqueness
+    all_roles = set()
+    all_permissions = set()
+    # Use dict to track role -> permissions mappings
+    role_permission_mappings = {}
+    
+    # Process each policy bundle
+    for row in rows:
+        bundle = row.get("bundle")
+        if not bundle or not isinstance(bundle, dict):
+            continue
+            
+        policies = bundle.get("policies", [])
+        if not isinstance(policies, list):
+            continue
+            
+        # Extract roles and permissions from each policy rule
+        for policy in policies:
+            if not isinstance(policy, dict):
+                continue
+                
+            # Extract role
+            role = policy.get("role")
+            if not role or not isinstance(role, str):
+                continue
+                
+            role = role.strip()
+            all_roles.add(role)
+            
+            # Extract permissions for this role
+            permissions = policy.get("permissions", [])
+            if isinstance(permissions, list):
+                # Initialize role in mappings if not exists
+                if role not in role_permission_mappings:
+                    role_permission_mappings[role] = set()
+                    
+                for perm in permissions:
+                    if perm and isinstance(perm, str):
+                        perm = perm.strip()
+                        all_permissions.add(perm)
+                        role_permission_mappings[role].add(perm)
+    
+    # Convert mappings to sorted lists for consistent API response
+    role_mappings = {}
+    for role, perms in role_permission_mappings.items():
+        role_mappings[role] = sorted(list(perms))
+    
+    # Convert sets to sorted lists for consistent API response
+    return {
+        "roles": sorted(list(all_roles)),
+        "permissions": sorted(list(all_permissions)),
+        "role_mappings": role_mappings
+    }
+
+
 @router.get("/{policy_id}", response_model=PolicySummary)
 async def get_policy_detail(
     policy_id: str,
@@ -837,8 +913,6 @@ async def get_policy_detail(
         raise HTTPException(status_code=404, detail="policy_not_found")
 
     return PolicySummary(**row)
-
-
 
 
 @router.patch("/{policy_id}/bundle", response_model=MessageResponse)
@@ -1014,6 +1088,70 @@ async def list_app_names(
         app_names.append("default")
     
     return sorted(app_names)
+
+
+@router.get("/roles-permissions")
+async def list_roles_and_permissions(
+    auth: AuthContext = Depends(require_scope("policy.read")),
+    supabase=Depends(get_supabase_async),
+):
+    """Extract all unique roles and permissions from policy bundles for UI suggestions.
+    
+    Returns two sets: all roles and all permissions that have been used across
+    all policy bundles (both draft and published) for this account.
+    
+    Useful for frontend autocomplete/dropdown suggestions when crafting new policies.
+    """
+    
+    # Fetch all policy bundles for this account (both draft and published)
+    rows = await query_many(
+        supabase,
+        POLICY_TABLE,
+        match={"account_id": auth.account_id},
+        select_fields="bundle",
+    )
+    
+    # Use sets to automatically handle uniqueness
+    all_roles = set()
+    all_permissions = set()
+    
+    # Process each policy bundle
+    for row in rows:
+        bundle = row.get("bundle")
+        if not bundle or not isinstance(bundle, dict):
+            continue
+            
+        policies = bundle.get("policies", [])
+        if not isinstance(policies, list):
+            continue
+            
+        # Extract roles and permissions from each policy rule
+        for policy in policies:
+            if not isinstance(policy, dict):
+                continue
+                
+            # Extract role
+            role = policy.get("role")
+            if role and isinstance(role, str):
+                all_roles.add(role.strip())
+                
+            # Extract permissions
+            permissions = policy.get("permissions", [])
+            if isinstance(permissions, list):
+                for perm in permissions:
+                    if perm and isinstance(perm, str):
+                        all_permissions.add(perm.strip())
+    
+    # Convert sets to sorted lists for consistent API response
+    return {
+        "roles": sorted(list(all_roles)),
+        "permissions": sorted(list(all_permissions)),
+        "stats": {
+            "total_roles": len(all_roles),
+            "total_permissions": len(all_permissions),
+            "policies_analyzed": len(rows)
+        }
+    }
 
 
 
