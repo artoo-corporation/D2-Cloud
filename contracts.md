@@ -1,12 +1,20 @@
 # D2 Cloud API Contracts
 
-*Last updated: 2025-09-15 – includes dual policy publish responses, role management, app quotas, frontend publishing, and policy crafting assistance*
+*Last updated: 2025-09-15 – includes dual policy publish responses, role management, app quotas, frontend publishing, policy crafting assistance, and comprehensive audit logging*
 
 ## Overview
 
 This document provides comprehensive API contracts for the D2 Cloud control plane. It's designed to be used by frontend developers and LLMs to understand how to interact with the API correctly.
 
 ## Recent Updates (2025-09-15)
+
+### 🔍 Comprehensive Audit Logging *(ENHANCED 2025-09-15)*
+- **Enhanced audit trail**: Complete tracking of all system operations with rich context
+- **User name resolution**: Shows actual user names instead of cryptic UUIDs in audit logs
+- **Resource attribution**: New `resource_type` and `resource_id` fields for precise resource tracking
+- **Rich metadata**: Structured additional data for each operation (token scopes, policy versions, etc.)
+- **Status tracking**: Clear success/failure/denied status for all operations
+- **Compliance ready**: Full audit trail suitable for security and compliance requirements
 
 ### 🎯 Policy Crafting Assistance *(NEW 2025-09-15)*
 - **New `/v1/policy/roles-permissions` endpoint**: Extracts all unique roles and permissions from existing policy bundles
@@ -1170,37 +1178,208 @@ X-Next-Cursor: "2024-01-01T11:59:59Z,uuid"
 
 ---
 
-## 📋 Audit Logs
+## 📋 Audit Logs *(Enhanced 2025-09-15)*
 
 ### GET /v1/audit
 
-**Purpose**: List audit logs (admin only)
+**Purpose**: List comprehensive audit logs with user attribution (admin only)
 
 **Auth**: `admin` scope
 
 **Query Parameters**:
-- `limit`: Max 1000
-- `cursor`: Pagination cursor
+- `limit`: Max 1000 (default: 100)
+- `cursor`: Pagination cursor `'<iso>,<id>'` from `X-Next-Cursor` header
 
-**Response**:
+**Response** *(Updated 2025-09-15)*:
 ```json
 [
   {
-    "id": "uuid",
-    "action": "policy.publish",
-    "actor_id": "account_uuid",
-    "timestamp": "2024-01-01T12:00:00Z",
+    "id": 9,
+    "actor_id": "f6188bb0-c023-47d4-86c5-13ad0fbc3b92",
+    "user_id": "f6188bb0-c023-47d4-86c5-13ad0fbc3b92",
+    "user_name": "David Kim",
+    "token_id": "6f53c148-ef6c-48b2-bb91-372959021df8",
+    "action": "key.revoke",
+    "key_id": "test-audit-key",
+    "version": null,
     "status": "success",
-    "resource_type": "policy",
-    "resource_id": "policy_uuid",
+    "resource_type": "key",
+    "resource_id": "test-audit-key",
+    "metadata": {},
+    "created_at": "2025-09-15T23:16:45.756085Z"
+  },
+  {
+    "id": 8,
+    "actor_id": "f6188bb0-c023-47d4-86c5-13ad0fbc3b92",
+    "user_id": "f6188bb0-c023-47d4-86c5-13ad0fbc3b92",
+    "user_name": "David Kim",
+    "token_id": "6f53c148-ef6c-48b2-bb91-372959021df8",
+    "action": "key.upload",
+    "key_id": "test-audit-key",
+    "version": null,
+    "status": "success",
+    "resource_type": "key",
+    "resource_id": "test-audit-key",
     "metadata": {
-      "app_name": "my-app",
-      "version": 6
+      "algorithm": "ed25519"
     },
-    "user_id": "user_uuid"
+    "created_at": "2025-09-15T23:15:56.266945Z"
   }
 ]
 ```
+
+**Headers** (for pagination):
+```http
+X-Next-Cursor: "2025-09-15T23:15:56Z,8"
+```
+
+### 🔍 Audit Log Fields *(NEW 2025-09-15)*
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | integer | Unique audit log entry ID |
+| `actor_id` | string | Account ID performing the action |
+| `user_id` | string\|null | User who performed the action (null for server tokens) |
+| `user_name` | string\|null | **NEW**: Display name of user (resolved from users table) |
+| `token_id` | string\|null | API token used for the action |
+| `action` | string | Standardized action type (e.g., `key.upload`, `policy.publish`) |
+| `key_id` | string\|null | Cryptographic key ID (for key operations) |
+| `version` | integer\|null | Resource version (for versioned resources like policies) |
+| `status` | string | **NEW**: Operation status (`success`, `failure`, `denied`, etc.) |
+| `resource_type` | string\|null | **NEW**: Type of resource (`token`, `key`, `policy`, `invitation`, `user`) |
+| `resource_id` | string\|null | **NEW**: ID of the specific resource acted upon |
+| `metadata` | object\|null | **NEW**: Additional structured data about the operation |
+| `created_at` | datetime | When the audit event occurred |
+
+### 📊 Audit Action Types
+
+**Token Operations**:
+- `token.create` - API token creation
+- `token.revoke` - API token revocation  
+- `token.rotate` - API token rotation
+
+**Key Operations**:
+- `key.upload` - Ed25519 public key upload
+- `key.revoke` - Key revocation
+
+**Policy Operations**:
+- `policy.draft` - Policy draft creation/update
+- `policy.publish` - Policy publication
+- `policy.revoke` - Policy revocation
+- `policy.revert` - Policy reversion to previous version
+- `policy.update` - Policy bundle content update
+
+**User Operations**:
+- `user.role_update` - User role change
+
+**Invitation Operations**:
+- `invitation.create` - Invitation creation
+- `invitation.accept` - Invitation acceptance
+- `invitation.cancel` - Invitation cancellation
+
+### 📋 Metadata Examples
+
+**Token Creation**:
+```json
+{
+  "metadata": {
+    "token_name": "My Dev Token",
+    "scopes": ["dev"],
+    "app_name": "my-app",
+    "assigned_user_id": "user-uuid",
+    "token_type": "user"
+  }
+}
+```
+
+**Policy Publish**:
+```json
+{
+  "metadata": {
+    "app_name": "my-app",
+    "version": 3,
+    "key_id": "signing-key-123",
+    "signature_required": true,
+    "bundle_size": 2048
+  }
+}
+```
+
+**User Role Update**:
+```json
+{
+  "metadata": {
+    "target_user_id": "user-uuid",
+    "old_role": "member",
+    "new_role": "admin"
+  }
+}
+```
+
+**Invitation Management**:
+```json
+{
+  "metadata": {
+    "email": "newuser@example.com",
+    "role": "dev",
+    "invited_by": "inviter-user-id"
+  }
+}
+```
+
+### 🔍 Frontend Usage
+
+```typescript
+// Audit log viewer with rich user context
+const loadAuditLogs = async (cursor?: string) => {
+  const url = `/v1/audit?limit=50${cursor ? `&cursor=${cursor}` : ''}`;
+  const response = await fetch(url, {
+    headers: { Authorization: `Bearer ${adminToken}` }
+  });
+  
+  const logs = await response.json();
+  const nextCursor = response.headers.get('X-Next-Cursor');
+  
+  return { logs, nextCursor };
+};
+
+// Display user-friendly audit entries
+const renderAuditEntry = (entry) => {
+  const userName = entry.user_name || 'System';
+  const action = entry.action.replace('.', ' ').toUpperCase();
+  const resource = entry.resource_type ? `${entry.resource_type}:${entry.resource_id}` : 'N/A';
+  
+  return `${userName} performed ${action} on ${resource} at ${entry.created_at}`;
+};
+
+// Filter by resource type
+const filterByResource = async (resourceType: string) => {
+  // Note: Filtering by resource_type requires backend implementation
+  // For now, filter client-side after fetching
+  const { logs } = await loadAuditLogs();
+  return logs.filter(log => log.resource_type === resourceType);
+};
+
+// Security monitoring - detect suspicious patterns
+const detectSuspiciousActivity = (logs) => {
+  const suspiciousPatterns = [
+    logs.filter(log => log.action === 'user.role_update' && log.metadata?.new_role === 'admin'),
+    logs.filter(log => log.action === 'token.create' && log.metadata?.scopes?.includes('admin')),
+    logs.filter(log => log.status === 'failure' && log.action.includes('policy')),
+  ];
+  
+  return suspiciousPatterns.flat();
+};
+```
+
+### 🎯 Use Cases
+
+1. **Compliance Auditing**: Complete trail of who did what when
+2. **Security Monitoring**: Track admin actions and permission changes  
+3. **Debugging**: Understand what operations led to issues
+4. **User Attribution**: See actual user names instead of cryptic IDs
+5. **Resource Tracking**: Find all operations on specific resources
+6. **Analytics**: Usage patterns and operation frequency
 
 ---
 

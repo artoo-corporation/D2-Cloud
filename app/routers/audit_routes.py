@@ -22,7 +22,7 @@ async def list_audit_logs(
     auth: AuthContext = Depends(require_scope("admin")),
     supabase=Depends(get_supabase_async),
 ):
-    """Paginated audit log list (newest first)."""
+    """Paginated audit log list (newest first) with user name attribution."""
 
     match = {"actor_id": auth.account_id}
     or_filter = None
@@ -42,15 +42,37 @@ async def list_audit_logs(
         match=match,
         or_filter=or_filter,
         order_by=("created_at", "desc"),
-        select_fields="id,actor_id,token_id,user_id,action,key_id,version,created_at",
+        select_fields="id,actor_id,token_id,user_id,action,key_id,version,status,resource_type,resource_id,metadata,created_at",
         limit=limit,
     )
 
     rows = rows_raw if isinstance(rows_raw, list) else getattr(rows_raw, "data", [])
 
+    # Get user names for attribution
+    user_ids = [row["user_id"] for row in rows if row.get("user_id")]
+    user_names = {}
+    
+    if user_ids:
+        from app.utils.database import query_data
+        user_resp = await query_data(
+            supabase,
+            "users",
+            filters={"user_id": ("in", user_ids)},
+            select_fields="user_id,display_name,full_name,email"
+        )
+        user_data = getattr(user_resp, "data", []) or []
+        for u in user_data:
+            user_names[u["user_id"]] = u.get("display_name") or u.get("full_name") or u.get("email") or "Unknown User"
+
+    # Add user names to audit records
+    enriched_rows = []
+    for row in rows:
+        row["user_name"] = user_names.get(row.get("user_id")) if row.get("user_id") else None
+        enriched_rows.append(row)
+
     next_cursor = f"{rows[-1]['created_at']},{rows[-1]['id']}" if rows else None
 
     return JSONResponse(
-        content=[AuditLogRecord(**r).model_dump(mode="json") for r in rows],
+        content=[AuditLogRecord(**r).model_dump(mode="json") for r in enriched_rows],
         headers={"X-Next-Cursor": next_cursor or ""},
     )

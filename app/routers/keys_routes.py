@@ -72,6 +72,11 @@ async def add_public_key(
         token_id=auth.token_id,
         user_id=auth.user_id,
         key_id=key_id,
+        resource_type="key",
+        resource_id=key_id,
+        metadata={
+            "algorithm": "ed25519",
+        },
     )
 
     return MessageResponse(message="key_added")
@@ -100,6 +105,8 @@ async def revoke_key(
         token_id=auth.token_id,
         user_id=auth.user_id,
         key_id=key_id,
+        resource_type="key",
+        resource_id=key_id,
     )
 
     return MessageResponse(message="key_revoked")
@@ -108,13 +115,13 @@ async def revoke_key(
 @router.get("", response_model=list[PublicKeyResponse])
 async def list_keys(
     include_revoked: int = Query(0, ge=0, le=1),
-    actor=Depends(require_actor_admin),  # OAuth users (frontend) can list keys
+    user=Depends(require_actor_admin),  # OAuth users (frontend) can list keys
     supabase=Depends(get_supabase_async),
 ):
-    # Build query with user name join (left join to handle NULL user_id from server tokens)
+    # Get public keys for the account
     query = supabase.table(PUBLIC_KEYS_TABLE).select(
         "key_id,algo,public_key,created_at,revoked_at,user_id"
-    ).eq("account_id", actor.account_id)
+    ).eq("account_id", user.account_id)
     
     if not include_revoked:
         query = query.is_("revoked_at", "null")
@@ -122,7 +129,22 @@ async def list_keys(
     resp = await query.execute()
     rows = getattr(resp, "data", None) or []
     
-    # Convert public keys from hex format back to base64 and format user names
+    # Get user names for attribution
+    user_ids = [row["user_id"] for row in rows if row.get("user_id")]
+    user_names = {}
+    
+    if user_ids:
+        user_resp = await query_data(
+            supabase,
+            "users",
+            filters={"user_id": ("in", user_ids)},
+            select_fields="user_id,display_name,full_name,email"
+        )
+        user_data = getattr(user_resp, "data", []) or []
+        for u in user_data:
+            user_names[u["user_id"]] = u.get("display_name") or u.get("full_name") or u.get("email") or "Unknown User"
+    
+    # Convert public keys from hex format back to base64 and add user names
     result = []
     for row in rows:
         public_key_raw = row["public_key"]
@@ -135,13 +157,13 @@ async def list_keys(
                 # Skip malformed keys
                 continue
         
-        # Set uploaded_by_name based on user_id presence
+        # Set uploaded_by_name with actual user name lookup
         if row.get("user_id") is None:
             # Key was uploaded by a server token (no user_id)
             uploaded_by_name = "Server Token"
         else:
-            # Key was uploaded by a user (could lookup name later if needed)
-            uploaded_by_name = "User"
+            # Look up actual user name
+            uploaded_by_name = user_names.get(row["user_id"], "Unknown User")
         
         row["uploaded_by_name"] = uploaded_by_name
         

@@ -108,7 +108,7 @@ async def update_user_role(
     account_id: str = Path(..., description="Account ID"),
     user_id: str = Path(..., description="User ID whose role is being updated"),
     request: UserRoleUpdateRequest = ...,
-    actor: Actor = Depends(require_actor_admin),
+    user: Actor = Depends(require_actor_admin),
     supabase=Depends(get_supabase_async),
 ):
     """Update the role of an existing user in the account.
@@ -118,9 +118,9 @@ async def update_user_role(
     """
 
     # Enforce Supabase session and account match
-    if actor.user_id is None:
+    if user.user_id is None:
         raise HTTPException(status_code=403, detail="supabase_session_required")
-    if actor.account_id != account_id:
+    if user.account_id != account_id:
         raise HTTPException(status_code=403, detail="account_mismatch")
 
     # Make sure target user exists in this account
@@ -152,8 +152,14 @@ async def update_user_role(
         action=AuditAction.user_role_update,
         actor_id=account_id,
         status=AuditStatus.success,
-        user_id=actor.user_id,
-        metadata={"target_user_id": user_id, "new_role": request.role.value},
+        user_id=user.user_id,
+        resource_type="user",
+        resource_id=user_id,
+        metadata={
+            "target_user_id": user_id, 
+            "new_role": request.role.value,
+            "old_role": target_user.get("role"),
+        },
     )
 
     return MessageResponse(message="role_updated") 

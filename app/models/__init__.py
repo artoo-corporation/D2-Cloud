@@ -316,12 +316,17 @@ class EventRecord(BaseModel):
 
 class AuditLogRecord(BaseModel):
     id: int
-    actor_id: str
-    token_id: str | None = None
+    actor_id: str  # Keep for backward compatibility, maps to account_id
     user_id: str | None = None
+    user_name: str | None = Field(None, description="Display name of user who performed the action")
+    token_id: str | None = None
     action: str
     key_id: str | None = None
     version: int | None = None
+    status: str | None = Field(None, description="Operation status")
+    resource_type: str | None = Field(None, description="Type of resource acted upon")
+    resource_id: str | None = Field(None, description="ID of the specific resource")
+    metadata: dict | None = Field(None, description="Additional structured data")
     created_at: datetime
 
 

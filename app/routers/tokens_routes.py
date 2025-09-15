@@ -61,7 +61,7 @@ async def _token_count(supabase, account_id: str) -> int:
 async def create_token(
     account_id: str = Path(..., description="Target account ID"),
     payload: TokenCreateRequest | None = None,
-    actor: Actor = Depends(require_actor_admin),  # Must be Supabase session (user_id present)
+    user: Actor = Depends(require_actor_admin),  # Must be Supabase session (user_id present)
     supabase=Depends(get_supabase_async),
 ):
     """Issue a new API token.
@@ -83,9 +83,9 @@ async def create_token(
     """
 
     # Enforce Supabase session and account match
-    if actor.user_id is None:
+    if user.user_id is None:
         raise HTTPException(status_code=403, detail="supabase_session_required")
-    if actor.account_id != account_id:
+    if user.account_id != account_id:
         raise HTTPException(status_code=403, detail="account_mismatch")
 
     # Handle assigned_user_id: validate that the target user belongs to the same account
@@ -155,7 +155,15 @@ async def create_token(
         actor_id=account_id,
         status=AuditStatus.success,
         token_id=token_id,
-        user_id=actor.user_id,
+        user_id=user.user_id,
+        resource_type="token",
+        resource_id=token_id,
+        metadata={
+            "token_name": payload.token_name if payload else None,
+            "scopes": scopes,
+            "app_name": app_name,
+            "assigned_user_id": assigned_user_id,
+        },
     )
 
     return TokenCreateResponse(
@@ -179,7 +187,7 @@ async def create_token(
 async def create_server_token(
     account_id: str = Path(..., description="Target account ID"),
     payload: ServerTokenRequest | None = None,
-    actor: Actor = Depends(require_actor_admin),  # Must be account admin (can be token or user)
+    user: Actor = Depends(require_actor_admin),  # Must be account admin (can be token or user)
     supabase=Depends(get_supabase_async),
 ):
     """Issue a new server API token.
@@ -192,7 +200,7 @@ async def create_server_token(
     """
     
     # Ensure caller has admin access to the account (but don't require Supabase session)
-    if actor.account_id != account_id:
+    if user.account_id != account_id:
         raise HTTPException(status_code=403, detail="account_mismatch")
     
     # Server tokens always get "server" scope (policy.read + event.ingest)
@@ -217,7 +225,7 @@ async def create_server_token(
             "token_name": payload.token_name if payload else "Server Token",
             "app_name": payload.app_name if payload else None,
             "assigned_user_id": None,  # Server tokens are not user-assigned
-            "created_by_user_id": actor.user_id,  # Track who created the server token
+            "created_by_user_id": user.user_id,  # Track who created the server token
             "expires_at": None,  # Server tokens don't expire by default
         },
     )
@@ -229,7 +237,14 @@ async def create_server_token(
         actor_id=account_id,
         status=AuditStatus.success,
         token_id=token_id,
-        user_id=actor.user_id,  # Will be None for server tokens, which is fine
+        user_id=user.user_id,  # Will be None for server tokens, which is fine
+        resource_type="token",
+        resource_id=token_id,
+        metadata={
+            "token_name": payload.token_name if payload else "Server Token",
+            "token_type": "server",
+            "app_name": payload.app_name if payload else None,
+        },
     )
     
     return TokenCreateResponse(
@@ -248,10 +263,10 @@ async def create_server_token(
 @router.get("/tokens", response_model=list[APITokenResponse])
 async def list_tokens(
     account_id: str = Path(...),
-    actor: Actor = Depends(require_actor_admin),
+    user: Actor = Depends(require_actor_admin),
     supabase=Depends(get_supabase_async),
 ):
-    if actor.account_id != account_id:
+    if user.account_id != account_id:
         raise HTTPException(status_code=403, detail="account_mismatch")
 
     resp = await query_data(
@@ -297,10 +312,10 @@ async def list_tokens(
 async def revoke_token(
     account_id: str = Path(...),
     token_id: str = Path(..., description="Token ID to revoke"),
-    actor: Actor = Depends(require_actor_admin),
+    user: Actor = Depends(require_actor_admin),
     supabase=Depends(get_supabase_async),
 ):
-    if actor.account_id != account_id:
+    if user.account_id != account_id:
         raise HTTPException(status_code=403, detail="account_mismatch")
 
     await update_data(
@@ -318,7 +333,9 @@ async def revoke_token(
         actor_id=account_id,
         status=AuditStatus.success,
         token_id=token_id,
-        user_id=actor.user_id,
+        user_id=user.user_id,
+        resource_type="token",
+        resource_id=token_id,
     )
 
     return MessageResponse(message="token_revoked")
@@ -337,12 +354,12 @@ async def revoke_token(
 async def rotate_token(
     account_id: str = Path(...),
     token_id: str = Path(..., description="Token ID to rotate"),
-    actor: Actor = Depends(require_actor_admin),
+    user: Actor = Depends(require_actor_admin),
     supabase=Depends(get_supabase_async),
 ):
     """Rotate a token: create new token with same settings, revoke old one."""
     
-    if actor.account_id != account_id:
+    if user.account_id != account_id:
         raise HTTPException(status_code=403, detail="account_mismatch")
 
     # Get existing token details
@@ -399,6 +416,13 @@ async def rotate_token(
         status=AuditStatus.success,
         token_id=new_token_id,  # New token ID
         user_id=existing_token.get("created_by_user_id"),
+        resource_type="token",
+        resource_id=token_id,  # Original token being rotated
+        metadata={
+            "old_token_id": token_id,
+            "new_token_id": new_token_id,
+            "token_name": existing_token.get("token_name"),
+        },
     )
 
     return TokenCreateResponse(
@@ -453,7 +477,7 @@ from typing import Dict
 @router.get("/users")
 async def list_account_users(
     account_id: str = Path(..., description="Account ID"),
-    actor: Actor = Depends(require_actor_admin),
+    user: Actor = Depends(require_actor_admin),
     supabase=Depends(get_supabase_async),
 ):
     """List all users in the account for token assignment dropdown.
@@ -462,9 +486,9 @@ async def list_account_users(
         List of users with basic info for frontend dropdowns
     """
     # Enforce Supabase session and account match
-    if actor.user_id is None:
+    if user.user_id is None:
         raise HTTPException(status_code=403, detail="supabase_session_required")
-    if actor.account_id != account_id:
+    if user.account_id != account_id:
         raise HTTPException(status_code=403, detail="account_mismatch")
 
     # Query users in the account

@@ -16,30 +16,34 @@ async def log_audit_event(
     user_id: Optional[str] = None,
     key_id: Optional[str] = None,
     version: Optional[int] = None,
+    resource_type: Optional[str] = None,
+    resource_id: Optional[str] = None,
+    metadata: Optional[dict] = None,
 ) -> None:
     """
-    Log an audit event using existing audit_logs schema.
+    Log an audit event using the comprehensive audit_logs schema.
     
     Args:
         supabase: Supabase client
         action: Standardized action type (AuditAction enum)
         actor_id: Account ID performing the action
-        status: Operation status (success/failure/denied/allowed) - stored in action field
+        status: Operation status (success/failure/denied/allowed)
         token_id: API token used (if applicable)
-        user_id: User who created the token (if applicable)
+        user_id: User who performed the action (if applicable)
         key_id: Cryptographic key ID (for key operations)
         version: Resource version (for versioned resources)
+        resource_type: Type of resource acted upon (policy, token, key, invitation, user)
+        resource_id: ID of the specific resource acted upon
+        metadata: Additional structured data about the operation
     """
-    # Format action with status for existing schema
-    action_with_status = f"{action.value}:{status.value}" if status != AuditStatus.success else action.value
-    
     audit_entry = {
         "actor_id": actor_id,
-        "action": action_with_status,
-        "created_at": datetime.now(timezone.utc),
+        "action": action.value,
+        "status": status.value,
+        "created_at": datetime.now(timezone.utc).isoformat(),
     }
     
-    # Add optional fields only if provided (matching existing schema)
+    # Add optional fields only if provided
     if token_id:
         audit_entry["token_id"] = token_id
     if user_id:
@@ -48,12 +52,20 @@ async def log_audit_event(
         audit_entry["key_id"] = key_id
     if version is not None:
         audit_entry["version"] = version
+    if resource_type:
+        audit_entry["resource_type"] = resource_type
+    if resource_id:
+        audit_entry["resource_id"] = resource_id
+    if metadata:
+        audit_entry["metadata"] = metadata
     
     try:
         await insert_data(supabase, "audit_logs", audit_entry)
-    except Exception:
+    except Exception as e:
         # Never let audit logging break the main operation
         # In production, you might want to log this to a separate error tracking system
+        from app.utils.logger import logger
+        logger.warning(f"Failed to log audit event: {e}")
         pass
 
 

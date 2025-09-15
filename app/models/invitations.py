@@ -48,6 +48,7 @@ class InvitationResponse(BaseModel):
     email: str = Field(..., description="Invited email address")
     role: str = Field(..., description="Assigned role")
     invited_by_user_id: str = Field(..., description="Who sent the invitation")
+    invited_by_name: Optional[str] = Field(None, description="Display name of user who sent the invitation")
     expires_at: datetime = Field(..., description="When invitation expires")
     accepted_at: Optional[datetime] = Field(None, description="When invitation was accepted")
     created_at: datetime = Field(..., description="When invitation was created")

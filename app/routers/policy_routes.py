@@ -336,7 +336,14 @@ async def upload_policy_draft(
             status=AuditStatus.success,
             token_id=auth.token_id,
             user_id=auth.user_id,
-            metadata={"app_name": app_name, "version": next_version}
+            version=next_version,
+            resource_type="policy",
+            resource_id=policy_id,
+            metadata={
+                "app_name": app_name, 
+                "version": next_version,
+                "bundle_size": len(str(bundle)),
+            }
         )
     except Exception:
         pass
@@ -616,7 +623,15 @@ async def publish_policy(
             status=AuditStatus.success,
             token_id=auth.token_id,
             user_id=auth.user_id,
-            metadata={"app_name": app_name, "version": new_version, "key_id": x_d2_key_id},
+            version=new_version,
+            resource_type="policy",
+            resource_id=policy_id,
+            metadata={
+                "app_name": app_name, 
+                "version": new_version, 
+                "key_id": x_d2_key_id,
+                "signature_required": x_d2_signature is not None,
+            },
         )
     except Exception:
         pass
