@@ -13,7 +13,6 @@ from app.models import AuditAction, AuditStatus, MessageResponse
 from app.models.invitations import (
     InvitationCreateRequest,
     InvitationResponse, 
-    InvitationAcceptRequest,
     InvitationListResponse,
     PendingInvitationInfo,
     InvitationRole,
@@ -66,7 +65,7 @@ async def create_invitation(
     existing_invitation = await query_one(
         supabase,
         "invitations", 
-        match={"account_id": account_id, "email": request.email, "accepted_at": None}
+        match={"account_id": account_id, "email": request.email, "accepted_at": ("is", "null")}
     )
     if existing_invitation:
         raise HTTPException(status_code=409, detail="invitation_already_exists")
@@ -98,13 +97,12 @@ async def create_invitation(
         actor_id=account_id,
         status=AuditStatus.success,
         user_id=actor.user_id,
-        metadata={"invited_email": request.email, "role": request.role.value}
     )
     
-    # Build URL for front-end (first allowed origin from settings or env)
+    # Build URL for front-end invitation acceptance page
     from app import settings
     base_url = os.getenv("FRONTEND_ORIGIN") or settings.ALLOWED_ORIGINS[0]
-    invitation_url = f"{base_url.rstrip('/')}/accept?token={invitation_token}"
+    invitation_url = f"{base_url.rstrip('/')}/v1/invitations/accept?token={invitation_token}"
 
     # TODO: send email with invitation_url
 
@@ -191,7 +189,7 @@ async def cancel_invitation(
 # Public endpoint for invitation acceptance (no auth required)
 invitation_public_router = APIRouter(prefix="/v1/invitations", tags=["invitations"])
 
-@invitation_public_router.get("/{invitation_token}")
+@invitation_public_router.get("/info/{invitation_token}")
 async def get_invitation_info(
     invitation_token: str = Path(..., description="Invitation token from email"),
     supabase=Depends(get_supabase_async),
@@ -238,9 +236,50 @@ async def get_invitation_info(
     )
 
 
+@invitation_public_router.get("/accept")
+async def get_accept_invitation_page(
+    token: str = Query(..., description="Invitation token from email link"),
+    supabase=Depends(get_supabase_async),
+):
+    """Get invitation acceptance page info (what user sees when they click the link)."""
+    # Find invitation by token (same logic as info endpoint)
+    invitation = await query_one(
+        supabase,
+        "invitations",
+        match={"invitation_token": token}
+    )
+    
+    if not invitation:
+        raise HTTPException(status_code=404, detail="invitation_not_found")
+    
+    # Check if invitation is expired
+    expires_at = datetime.fromisoformat(invitation["expires_at"]).astimezone(timezone.utc)
+    if datetime.now(timezone.utc) >= expires_at:
+        raise HTTPException(status_code=410, detail="invitation_expired")
+    
+    # Check if already accepted
+    if invitation.get("accepted_at"):
+        raise HTTPException(status_code=409, detail="invitation_already_accepted")
+    
+    # Get inviter's name
+    inviter = await query_one(
+        supabase,
+        "users",
+        match={"user_id": invitation["invited_by_user_id"]}
+    )
+    
+    # Return invitation details for the acceptance page
+    return PendingInvitationInfo(
+        account_name=invitation.get("account_name", "Unknown Organization"),
+        invited_by_name=inviter.get("display_name") or inviter.get("full_name") or "Unknown User",
+        role=invitation["role"],
+        expires_at=expires_at
+    )
+
+
 @invitation_public_router.post("/accept")
 async def accept_invitation(
-    request: InvitationAcceptRequest,
+    token: str = Query(..., description="Invitation token from email link"),
     actor: Actor = Depends(require_actor_admin),  # User must be signed in
     supabase=Depends(get_supabase_async),
 ):
@@ -255,7 +294,7 @@ async def accept_invitation(
     invitation = await query_one(
         supabase,
         "invitations",
-        match={"invitation_token": request.invitation_token}
+        match={"invitation_token": token}
     )
     
     if not invitation:

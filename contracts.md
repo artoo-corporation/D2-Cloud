@@ -1134,7 +1134,7 @@ X-Next-Cursor: "2024-01-01T11:59:59Z,uuid"
 ```json
 {
   "message": "invitation_sent_to_dev@example.com",
-  "invitation_url": "https://d2.artoo.love/accept?token=inv_abc123..."
+  "invitation_url": "https://d2.artoo.love/invitations/accept?token=inv_abc123..."
 }
 ```
 Send the returned `invitation_url` to the invitee (email, Slack, etc.).
@@ -1167,9 +1167,9 @@ Send the returned `invitation_url` to the invitee (email, Slack, etc.).
 
 **Response**: `204 No Content`
 
-### GET /public/invitations/{invitation_token}
+### GET /v1/invitations/info/{invitation_token}
 
-**Purpose**: Get invitation details (public endpoint)
+**Purpose**: Get invitation details (public endpoint) *(Updated 2025-09-08)*
 
 **Auth**: None
 
@@ -1185,23 +1185,49 @@ Send the returned `invitation_url` to the invitee (email, Slack, etc.).
 }
 ```
 
-### POST /public/invitations/accept
+### GET /v1/invitations/accept
 
-**Purpose**: Accept invitation (public endpoint)
+**Purpose**: Get invitation acceptance page info (what user sees when clicking email link) *(NEW 2025-09-08)*
 
-**Auth**: Supabase JWT (user accepting)
+**Auth**: None (public endpoint)
+
+**Query Parameters**:
+- `token`: Invitation token from email link
 
 **Request**:
-```json
-{
-  "invitation_token": "secure_token"
-}
+```bash
+GET /v1/invitations/accept?token=inv_abc123...
 ```
 
 **Response**:
 ```json
 {
-  "message": "Invitation accepted successfully"
+  "account_name": "Acme Corp",
+  "invited_by_name": "John Smith", 
+  "role": "dev",
+  "expires_at": "2024-01-08T00:00:00Z"
+}
+```
+
+### POST /v1/invitations/accept
+
+**Purpose**: Accept invitation and join organization *(Updated 2025-09-08)*
+
+**Auth**: Supabase JWT (user accepting)
+
+**Query Parameters**:
+- `token`: Invitation token from email link
+
+**Request**:
+```bash
+POST /v1/invitations/accept?token=inv_abc123...
+# No request body needed
+```
+
+**Response**:
+```json
+{
+  "message": "invitation_accepted"
 }
 ```
 
