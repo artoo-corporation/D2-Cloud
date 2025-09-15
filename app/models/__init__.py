@@ -112,6 +112,17 @@ class AuditAction(str, Enum):
     invitation_create = "invitation.create"
     invitation_accept = "invitation.accept"
     invitation_cancel = "invitation.cancel"
+    
+    # Authentication/Authorization operations (NEW 2025-09-15)
+    auth_failure = "auth.failure"
+    auth_success = "auth.success"
+    scope_denied = "auth.scope_denied"
+    token_expired = "auth.token_expired"
+    token_revoked = "auth.token_revoked"
+    
+    # Data access operations (NEW 2025-09-15)
+    data_access = "data.access"
+    sensitive_data_access = "data.sensitive_access"
 
 class AuditStatus(str, Enum):
     """Status of audited operations."""
@@ -234,8 +245,8 @@ class User(BaseModel):  # noqa: D101 – simple data carrier
     full_name: Optional[str] = None
 
 class PublicKeyAddRequest(BaseModel):
-    key_id: Optional[str] = Field(None, description="Unique identifier for the key")
     public_key: str = Field(..., description="Base64-encoded Ed25519 public key")
+    # NOTE: key_id is system-generated for security - user input not accepted
 
 class PublicKeyResponse(BaseModel):
     key_id: str

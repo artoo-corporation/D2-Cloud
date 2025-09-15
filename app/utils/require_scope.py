@@ -126,6 +126,25 @@ def require_scope(*expected_scopes: str):  # noqa: D401 – factory function
 
         # Admin scope acts as wildcard
         if "admin" not in effective_scopes and not expected.issubset(effective_scopes):
+            # Log authorization failure
+            try:
+                from app.utils.audit import log_audit_event
+                from app.models import AuditAction, AuditStatus
+                await log_audit_event(
+                    supabase,
+                    action=AuditAction.scope_denied,
+                    actor_id=account_id,
+                    status=AuditStatus.denied,
+                    token_id=details.get("token_id") if isinstance(details, dict) else None,
+                    user_id=details.get("user_id") if isinstance(details, dict) else None,
+                    metadata={
+                        "required_scopes": list(expected),
+                        "available_scopes": list(effective_scopes),
+                        "endpoint": str(request.url) if request else None,
+                    },
+                )
+            except Exception:
+                pass  # Don't let audit logging break auth
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="insufficient_scope",

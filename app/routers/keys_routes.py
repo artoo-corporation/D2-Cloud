@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import uuid
+import hashlib
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status, Query
@@ -40,7 +41,10 @@ async def add_public_key(
     except Exception:  # noqa: BLE001
         raise HTTPException(status_code=400, detail="invalid_public_key")
 
-    key_id = payload.key_id or str(uuid.uuid4())
+    # Generate system-controlled key ID (SECURITY: Never use user input for key IDs)
+    # Format: ed_<12-char-hex> based on key content + timestamp for uniqueness
+    key_hash = hashlib.sha256(key_bytes + datetime.now(timezone.utc).isoformat().encode()).hexdigest()
+    key_id = f"ed_{key_hash[:12]}"
 
     # Build insert data - only include user_id if it exists (server tokens have None)
     insert_data_dict = {
@@ -79,7 +83,7 @@ async def add_public_key(
         },
     )
 
-    return MessageResponse(message="key_added")
+    return MessageResponse(message=f"key_added: {key_id}")
 
 
 @router.delete("/{key_id}", response_model=MessageResponse, status_code=status.HTTP_202_ACCEPTED)

@@ -208,13 +208,63 @@ async def verify_api_token(
                     break
 
     if not row:
+        # Log authentication failure
+        try:
+            from app.utils.audit import log_audit_event
+            from app.models import AuditAction, AuditStatus
+            await log_audit_event(
+                supabase,
+                action=AuditAction.auth_failure,
+                actor_id="unknown",  # No account context yet
+                status=AuditStatus.failure,
+                metadata={
+                    "reason": "invalid_token",
+                    "token_prefix": token[:8] + "..." if len(token) > 8 else token,
+                },
+            )
+        except Exception:
+            pass  # Don't let audit logging break auth
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
 
     # Revocation / expiry
     if row.get("revoked_at") is not None:
+        # Log revoked token usage attempt
+        try:
+            from app.utils.audit import log_audit_event
+            from app.models import AuditAction, AuditStatus
+            await log_audit_event(
+                supabase,
+                action=AuditAction.token_revoked,
+                actor_id=row.get("account_id", "unknown"),
+                status=AuditStatus.denied,
+                token_id=row.get("token_id"),
+                metadata={
+                    "reason": "token_revoked",
+                    "revoked_at": row.get("revoked_at"),
+                },
+            )
+        except Exception:
+            pass
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Token revoked")
 
     if row.get("expires_at") and datetime.fromisoformat(row["expires_at"]).astimezone(timezone.utc) < datetime.now(timezone.utc):
+        # Log expired token usage attempt
+        try:
+            from app.utils.audit import log_audit_event
+            from app.models import AuditAction, AuditStatus
+            await log_audit_event(
+                supabase,
+                action=AuditAction.token_expired,
+                actor_id=row.get("account_id", "unknown"),
+                status=AuditStatus.denied,
+                token_id=row.get("token_id"),
+                metadata={
+                    "reason": "token_expired",
+                    "expires_at": row.get("expires_at"),
+                },
+            )
+        except Exception:
+            pass
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired")
 
     scopes = row.get("scopes") or []

@@ -932,25 +932,26 @@ const createRoleTemplate = (existingRole, suggestions) => {
 
 **Auth**: `key.upload` scope
 
-**Request**:
+**Request** *(Updated 2025-09-15)*:
 ```json
 {
-  "key_id": "my-signing-key-1",
   "public_key": "base64_encoded_public_key"
 }
 ```
 
-**Response**:
+**Security Note**: `key_id` is now system-generated (format: `ed_<12-hex-chars>`) for security and audit consistency. User-provided key IDs are no longer accepted.
+
+**Response** *(Updated 2025-09-15)*:
 ```json
 {
-  "message": "key_added"
+  "message": "key_added: ed_5742a979d8b3"
 }
 ```
 
-**Frontend Usage**:
+**Frontend Usage** *(Updated 2025-09-15)*:
 ```typescript
-// Key upload form
-const uploadKey = async (keyId, publicKeyBase64) => {
+// Key upload form - key_id is now system-generated
+const uploadKey = async (publicKeyBase64) => {
   const response = await fetch('/v1/keys', {
     method: 'POST',
     headers: {
@@ -958,12 +959,15 @@ const uploadKey = async (keyId, publicKeyBase64) => {
       'Content-Type': 'application/json'
     },
     body: JSON.stringify({
-      key_id: keyId,
       public_key: publicKeyBase64
     })
   });
   
   if (response.ok) {
+    const result = await response.json();
+    // Extract generated key ID from response message
+    const keyId = result.message.split(': ')[1];
+    showKeyAddedMessage(`Key uploaded successfully with ID: ${keyId}`);
     refreshKeyList();
   }
 };
