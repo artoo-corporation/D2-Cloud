@@ -7,7 +7,7 @@ from datetime import datetime, timezone, timedelta
 from uuid import uuid4
 import os
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, status, Header
 
 from app.models import AuditAction, AuditStatus, MessageResponse
 from app.models.invitations import (
@@ -280,15 +280,15 @@ async def get_accept_invitation_page(
 @invitation_public_router.post("/accept")
 async def accept_invitation(
     token: str = Query(..., description="Invitation token from email link"),
-    actor: Actor = Depends(require_actor_admin),  # User must be signed in
+    authorization: str | None = Header(None),  # Supabase session required
     supabase=Depends(get_supabase_async),
 ):
     """Accept an invitation and join the account.
     
     User must be authenticated with Supabase (just signed up/in).
     """
-    if actor.user_id is None:
-        raise HTTPException(status_code=403, detail="supabase_session_required")
+    if not authorization:
+        raise HTTPException(status_code=401, detail="supabase_session_required")
     
     # Find invitation
     invitation = await query_one(
@@ -308,18 +308,9 @@ async def accept_invitation(
     if invitation.get("accepted_at"):
         raise HTTPException(status_code=409, detail="invitation_already_accepted")
     
-    # Check if user is already in some account
-    existing_user = await query_one(
-        supabase,
-        "users",
-        match={"user_id": actor.user_id}
-    )
-    
-    if existing_user:
-        raise HTTPException(status_code=409, detail="user_already_has_account")
-    
     # Get user info from Supabase Auth
-    user_response = await supabase.auth.get_user()
+    bearer = (authorization or "").split(" ")[-1]
+    user_response = await supabase.auth.get_user(bearer)
     user = getattr(user_response, "user", None)
     if not user:
         raise HTTPException(status_code=401, detail="invalid_session")
@@ -328,12 +319,22 @@ async def accept_invitation(
     if user_email != invitation["email"].lower():
         raise HTTPException(status_code=400, detail="email_mismatch")
     
+    # Check if user is already in some account
+    existing_user = await query_one(
+        supabase,
+        "users",
+        match={"user_id": getattr(user, "id", None)}
+    )
+    
+    if existing_user:
+        raise HTTPException(status_code=409, detail="user_already_has_account")
+    
     # Add user to the account
     await insert_data(
         supabase,
         "users",
         {
-            "user_id": actor.user_id,
+            "user_id": getattr(user, "id", None),
             "account_id": invitation["account_id"],
             "email": user_email,
             "role": invitation["role"],
@@ -349,7 +350,7 @@ async def accept_invitation(
         {"id": invitation["id"]},
         {
             "accepted_at": datetime.now(timezone.utc).isoformat(),
-            "accepted_by_user_id": actor.user_id
+            "accepted_by_user_id": getattr(user, "id", None)
         }
     )
     
@@ -359,7 +360,7 @@ async def accept_invitation(
         action=AuditAction.invitation_accept,
         actor_id=invitation["account_id"],
         status=AuditStatus.success,
-        user_id=actor.user_id,
+        user_id=getattr(user, "id", None),
         metadata={"email": user_email, "role": invitation["role"]}
     )
     

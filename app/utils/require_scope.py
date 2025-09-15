@@ -22,7 +22,10 @@ from fastapi import Depends, Header, HTTPException, Request, status
 from app.models import AuthContext
 from app.utils.dependencies import get_supabase_async
 from app.utils.security_utils import verify_api_token
+from app.utils.security_utils import verify_supabase_jwt
+from app.utils.database import query_one
 from app import APP_ENV
+from jose import jwt as jose_jwt
 
 
 def _dev_account_id() -> str:
@@ -55,29 +58,63 @@ def require_scope(*expected_scopes: str):  # noqa: D401 – factory function
 
         token = (authorization or "").split(" ")[-1]
 
-        # `verify_api_token` is *async* in production, but some unit tests patch
-        # it with a synchronous stub.  We therefore support both calling
-        # conventions.
+        # ------------------------------------------------------------------
+        # Mixed auth support: Opaque D2 tokens OR Supabase JWTs (frontend)
+        # ------------------------------------------------------------------
+        if token.startswith("d2_"):
+            # Opaque D2 tokens – use API token verifier and get details
+            result: Any = verify_api_token(
+                token,
+                supabase,
+                admin_only=False,
+                return_details=True,
+            )
 
-        result: Any = verify_api_token(
-            token,
-            supabase,
-            admin_only=False,
-            return_details=True,
-        )
+            if inspect.isawaitable(result):
+                result = await result
 
-        if inspect.isawaitable(result):
-            result = await result
-
-        # Result can be either details dict, (account_id, scopes) tuple, or bare account_id
-        if isinstance(result, dict):
-            account_id = result["account_id"]
-            scopes = result.get("scopes", [])
-            request.state.app_name = result.get("app_name")  # Store app_name from token
-        elif isinstance(result, tuple):
-            account_id, scopes = result
+            # Result can be either details dict, (account_id, scopes) tuple, or bare account_id
+            if isinstance(result, dict):
+                account_id = result["account_id"]
+                scopes = result.get("scopes", [])
+                request.state.app_name = result.get("app_name")  # Store app_name from token
+                user_id = result.get("user_id")
+                token_id = result.get("token_id")
+            elif isinstance(result, tuple):
+                account_id, scopes = result
+                user_id = None
+                token_id = None
+            else:
+                account_id, scopes = result, ["admin"]  # Legacy path – full privileges
+                user_id = None
+                token_id = None
         else:
-            account_id, scopes = result, ["admin"]  # Legacy path – full privileges
+            # Supabase JWT – validate session and map user role -> effective scopes
+            account_id = await verify_supabase_jwt(token, admin_only=False)
+
+            # Extract Supabase auth user id from claims for attribution
+            try:
+                claims = jose_jwt.get_unverified_claims(token)
+                user_id = claims.get("sub")
+            except Exception:  # noqa: BLE001
+                user_id = None
+
+            # Look up role in our users table to determine capabilities
+            role_row = None
+            if user_id is not None:
+                role_row = await query_one(supabase, "users", match={"user_id": user_id})
+
+            role = (role_row or {}).get("role")
+            # Base scopes derived from role
+            if role in {"admin", "owner"}:
+                scopes = ["admin"]
+            elif role == "dev":
+                scopes = ["dev"]
+            elif role == "member":
+                scopes = ["policy.read"]
+            else:
+                scopes = []
+            token_id = None
 
         effective_scopes = set(scopes)
 
@@ -97,16 +134,16 @@ def require_scope(*expected_scopes: str):  # noqa: D401 – factory function
         # Store context for backward compatibility with existing code
         request.state.account_id = account_id  # type: ignore[attr-defined]
         request.state.scopes = scopes          # type: ignore[attr-defined]
-        request.state.token_id = result.get("token_id") if isinstance(result, dict) else None  # type: ignore[attr-defined]
-        request.state.user_id = result.get("user_id") if isinstance(result, dict) else None    # type: ignore[attr-defined]
-        request.state.app_name = result.get("app_name") if isinstance(result, dict) else None  # type: ignore[attr-defined]
+        request.state.token_id = token_id      # type: ignore[attr-defined]
+        request.state.user_id = user_id        # type: ignore[attr-defined]
+        # app_name only set for D2 tokens carrying app context
 
         return AuthContext(
             account_id=account_id,
             scopes=scopes,
-            user_id=result.get("user_id") if isinstance(result, dict) else None,
-            token_id=result.get("token_id") if isinstance(result, dict) else None,
-            app_name=result.get("app_name") if isinstance(result, dict) else None,
+            user_id=user_id,
+            token_id=token_id,
+            app_name=getattr(request.state, "app_name", None),
         )
 
     return _checker
