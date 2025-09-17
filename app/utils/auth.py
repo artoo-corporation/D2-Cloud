@@ -95,11 +95,17 @@ async def _authenticate_token(
 
         # Extract user ID and role from the already-parsed JWT claims
         user_id = claims.get("sub")
-        role = claims.get("role") or claims.get("user_metadata", {}).get("role")
-        # Fall back to database lookup only if role not in JWT
-        if role is None and user_id is not None:
+        jwt_role = claims.get("role") or claims.get("user_metadata", {}).get("role")
+        
+        # Always check database first for custom application roles
+        role = None
+        if user_id is not None:
             role_row = await query_one(supabase, "users", match={"user_id": user_id})
             role = (role_row or {}).get("role")
+        
+        # Fall back to JWT role if no database role found
+        if not role:
+            role = jwt_role
         
         # Map role to scopes
         if role in {"admin", "owner"}:
@@ -115,6 +121,8 @@ async def _authenticate_token(
             scopes = ["dev"]
         elif role == "member":
             scopes = ["policy.read"]
+        elif role == "authenticated":
+            scopes = ["policy.read"]  # Basic read access for authenticated users
         else:
             scopes = []
 
