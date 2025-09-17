@@ -221,6 +221,17 @@ async def verify_api_token(
             if stored_hash and (stored_hash.startswith("$2b") or stored_hash.startswith("$2a")):
                 if _verify_hash(token_sha, stored_hash):
                     row = candidate
+                    # Opportunistic backfill: if token_lookup is missing, update it
+                    if lookup is not None and not candidate.get("token_lookup"):
+                        try:
+                            await update_data(
+                                supabase,
+                                API_TOKEN_TABLE,
+                                match={"token_id": candidate["token_id"]},
+                                updates={"token_lookup": lookup}
+                            )
+                        except Exception:
+                            pass  # Don't let backfill break auth
                     break
 
     if not row:

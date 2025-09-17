@@ -4,6 +4,7 @@ This script:
 - Reads OLD_JWK_AES_KEY from env (required)
 - Uses NEW_JWK_AES_KEY from env, or generates one if missing
 - Re-encrypts all rows in table `jwks_keys` from OLD to NEW
+- Clears all `token_lookup` values (they become invalid with new AES key)
 - Verifies each updated row can be decrypted with NEW only
 - Prints the NEW_JWK_AES_KEY at the end for you to set in your service env
 
@@ -16,8 +17,10 @@ Usage:
   # export NEW_JWK_AES_KEY="<new-key>"
   python scripts/rotate_jwk_aes_key.py
 
-After it completes successfully, set your service env:
-  JWK_AES_KEY="<printed NEW key>"  # then restart the API
+After it completes successfully:
+  - Local .env file is automatically updated
+  - Set JWK_AES_KEY="<printed NEW key>" in your production/server env
+  - Restart the API
 """
 
 from __future__ import annotations
@@ -51,6 +54,45 @@ def _validate_key(key_str: str) -> None:
     raw = base64.urlsafe_b64decode(padded)
     if len(raw) != 32:
         raise ValueError("JWK_AES_KEY must decode to 32 bytes")
+
+
+async def _clear_token_lookups(supabase) -> Dict[str, Any]:
+    """Clear all token_lookup values since they become invalid after AES key rotation."""
+    try:
+        # First get all tokens that have token_lookup values
+        tokens_with_lookup = await query_many(
+            supabase,
+            "api_tokens",
+            match={},
+            select_fields="token_id,token_lookup"
+        )
+        
+        if not tokens_with_lookup:
+            return {"cleared": True, "count": 0, "error": None}
+        
+        # Filter to only tokens that actually have token_lookup values
+        tokens_to_clear = [t for t in tokens_with_lookup if t.get("token_lookup")]
+        
+        if not tokens_to_clear:
+            return {"cleared": True, "count": 0, "error": None}
+        
+        # Clear token_lookup for each token individually
+        cleared_count = 0
+        for token in tokens_to_clear:
+            try:
+                await update_data(
+                    supabase,
+                    "api_tokens",
+                    update_values={"token_lookup": None},
+                    filters={"token_id": token["token_id"]}
+                )
+                cleared_count += 1
+            except Exception as e:
+                print(f"Warning: Failed to clear token_lookup for {token['token_id']}: {e}")
+        
+        return {"cleared": True, "count": cleared_count, "error": None}
+    except Exception as e:
+        return {"cleared": False, "count": 0, "error": str(e)}
 
 
 async def _rotate_all_rows(old_key: str, new_key: str) -> Dict[str, Any]:
@@ -129,6 +171,25 @@ async def main() -> None:
 
     print("Starting AES-key rotation for jwks_keys ...")
     result = await _rotate_all_rows(old_key, new_key)
+    
+    # Clear token_lookup values since they become invalid with new AES key
+    print("\nClearing token_lookup values (they'll be backfilled on next use)...")
+    supabase = await (get_supabase_async()).__anext__()
+    try:
+        lookup_result = await _clear_token_lookups(supabase)
+        if lookup_result["cleared"]:
+            count = lookup_result.get("count", 0)
+            print(f"✅ Token lookup values cleared successfully ({count} tokens)")
+        else:
+            print(f"❌ Failed to clear token lookups: {lookup_result['error']}")
+    finally:
+        # Best-effort close
+        try:
+            close_coro = getattr(supabase, "aclose", None)
+            if callable(close_coro):
+                await close_coro()
+        except Exception:
+            pass
 
     print("\nDone.")
     print(f"Rows found:   {result['total']}")
@@ -140,10 +201,42 @@ async def main() -> None:
 
     print("\nNEW_JWK_AES_KEY:")
     print(new_key)
+    
+    # Automatically update local .env file
+    try:
+        env_file_path = PROJECT_ROOT / ".env"
+        if env_file_path.exists():
+            # Read current .env content
+            with open(env_file_path, 'r') as f:
+                lines = f.readlines()
+            
+            # Update or add JWK_AES_KEY
+            updated = False
+            for i, line in enumerate(lines):
+                if line.strip().startswith('JWK_AES_KEY='):
+                    lines[i] = f'JWK_AES_KEY="{new_key}"\n'
+                    updated = True
+                    break
+            
+            if not updated:
+                lines.append(f'JWK_AES_KEY="{new_key}"\n')
+            
+            # Write back to .env file
+            with open(env_file_path, 'w') as f:
+                f.writelines(lines)
+            
+            print(f"✅ Local .env file updated with new JWK_AES_KEY")
+        else:
+            print("⚠️  No .env file found - you'll need to set the key manually")
+    except Exception as e:
+        print(f"⚠️  Failed to update .env file: {e}")
+    
     print("\nNext steps:")
-    print("1) Set JWK_AES_KEY to the NEW_JWK_AES_KEY in your service env (the script already used the current JWK_AES_KEY as OLD)")
-    print("2) Restart the API")
+    print("1) Set JWK_AES_KEY in your PRODUCTION/SERVER environment:")
+    print(f"   JWK_AES_KEY=\"{new_key}\"")
+    print("2) Restart the API server")
     print("3) Expect one slow request per existing API token (we backfill token_lookup automatically)")
+    print("\nNote: All token_lookup values were cleared to prevent stale lookups from causing slow requests.")
 
 
 if __name__ == "__main__":

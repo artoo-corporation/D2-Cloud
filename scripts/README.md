@@ -40,13 +40,17 @@ python scripts/rotate_jwk_aes_key.py
 ```
 
 Output:
-- Summary of rows processed (updated/errors)
+- Summary of rows processed (updated/errors)  
+- Confirmation that token_lookup values were cleared
 - NEW_JWK_AES_KEY printed to stdout
 
 Next steps:
-1) Set `JWK_AES_KEY` in your service environment to the printed NEW key
-2) Restart the API
-3) Expect one slow request per existing API token the first time it’s used (we automatically backfill `token_lookup` so subsequent requests are fast)
+1) Local `.env` file is automatically updated with the new key
+2) Set `JWK_AES_KEY` in your **production/server** environment to the printed NEW key  
+3) Restart the API
+4) Expect one slow request per existing API token the first time it's used (we automatically backfill `token_lookup` so subsequent requests are fast)
+
+**Important**: This script now automatically clears all `token_lookup` values when rotating the AES key, preventing authentication latency issues that would occur if stale lookup values were left in the database.
 
 Expectations & side-effects:
 - RSA keys and `kid` values remain the same; clients keep working
