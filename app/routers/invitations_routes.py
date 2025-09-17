@@ -19,7 +19,8 @@ from app.models.invitations import (
     InvitationCreateResponse,
 )
 from app.utils.audit import log_audit_event
-from app.utils.dependencies import get_supabase_async, require_actor_admin, Actor
+from app.utils.dependencies import get_supabase_async
+from app.utils.auth import require_auth
 from app.utils.database import insert_data, query_data, query_one, update_data
 
 router = APIRouter(prefix="/v1/accounts/{account_id}/invitations", tags=["invitations"])
@@ -38,7 +39,7 @@ async def _generate_invitation_token() -> str:
 async def create_invitation(
     account_id: str = Path(..., description="Account ID"),
     request: InvitationCreateRequest = ...,
-    user: Actor = Depends(require_actor_admin),
+    auth: AuthContext = Depends(require_auth(admin_only=True, require_user=True)),
     supabase=Depends(get_supabase_async),
 ):
     """Create a new invitation to join the account.
@@ -47,7 +48,7 @@ async def create_invitation(
     Invited users will receive an email with a secure link to accept.
     """
     # Enforce account access and admin role
-    if user.account_id != account_id:
+    if auth.account_id != account_id:
         raise HTTPException(status_code=403, detail="account_mismatch")
     if user.user_id is None:
         raise HTTPException(status_code=403, detail="supabase_session_required")
@@ -56,7 +57,7 @@ async def create_invitation(
     existing_user = await query_one(
         supabase,
         "users",
-        match={"account_id": account_id, "email": request.email}
+        match={"account_id": auth.account_id, "email": request.email}
     )
     if existing_user:
         raise HTTPException(status_code=409, detail="user_already_in_account")
@@ -65,7 +66,7 @@ async def create_invitation(
     existing_invitation = await query_one(
         supabase,
         "invitations", 
-        match={"account_id": account_id, "email": request.email, "accepted_at": ("is", "null")}
+        match={"account_id": auth.account_id, "email": request.email, "accepted_at": ("is", "null")}
     )
     if existing_invitation:
         raise HTTPException(status_code=409, detail="invitation_already_exists")
@@ -81,10 +82,10 @@ async def create_invitation(
         "invitations",
         {
             "id": invitation_id,
-            "account_id": account_id,
+            "account_id": auth.account_id,
             "email": request.email,
             "role": request.role.value,
-            "invited_by_user_id": user.user_id,
+            "invited_by_user_id": auth.user_id,
             "invitation_token": invitation_token,
             "expires_at": expires_at.isoformat(),
         }
@@ -96,7 +97,7 @@ async def create_invitation(
         action=AuditAction.invitation_create,
         actor_id=account_id,
         status=AuditStatus.success,
-        user_id=user.user_id,
+        user_id=auth.user_id,
         resource_type="invitation",
         resource_id=invitation_id,
         metadata={
@@ -122,16 +123,16 @@ async def create_invitation(
 async def list_invitations(
     account_id: str = Path(..., description="Account ID"),
     include_accepted: bool = Query(False, description="Include accepted invitations"),
-    user: Actor = Depends(require_actor_admin),
+    auth: AuthContext = Depends(require_auth(admin_only=True, require_user=True)),
     supabase=Depends(get_supabase_async),
 ):
     """List all invitations for the account with user name attribution."""
     # Enforce account access
-    if user.account_id != account_id:
+    if auth.account_id != account_id:
         raise HTTPException(status_code=403, detail="account_mismatch")
     
     # Build query filters
-    filters = {"account_id": account_id}
+    filters = {"account_id": auth.account_id}
     if not include_accepted:
         filters["accepted_at"] = None
     
@@ -182,19 +183,19 @@ async def list_invitations(
 async def cancel_invitation(
     account_id: str = Path(..., description="Account ID"),
     invitation_id: str = Path(..., description="Invitation ID to cancel"),
-    user: Actor = Depends(require_actor_admin),
+    auth: AuthContext = Depends(require_auth(admin_only=True, require_user=True)),
     supabase=Depends(get_supabase_async),
 ):
     """Cancel a pending invitation."""
     # Enforce account access
-    if user.account_id != account_id:
+    if auth.account_id != account_id:
         raise HTTPException(status_code=403, detail="account_mismatch")
     
     # Find invitation
     invitation = await query_one(
         supabase,
         "invitations",
-        match={"id": invitation_id, "account_id": account_id}
+        match={"id": invitation_id, "account_id": auth.account_id}
     )
     if not invitation:
         raise HTTPException(status_code=404, detail="invitation_not_found")
@@ -211,7 +212,7 @@ async def cancel_invitation(
         action=AuditAction.invitation_cancel,
         actor_id=account_id,
         status=AuditStatus.success,
-        user_id=user.user_id,
+        user_id=auth.user_id,
         resource_type="invitation",
         resource_id=invitation_id,
         metadata={

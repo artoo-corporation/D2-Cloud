@@ -8,11 +8,11 @@ import hashlib
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status, Query
-from app.utils.require_scope import require_scope
+from app.utils.auth import require_auth
 
 from app.models import AuditAction, AuditStatus, AuthContext, MessageResponse, PublicKeyAddRequest, PublicKeyResponse, TokenScopeError
 from app.utils.audit import log_audit_event
-from app.utils.dependencies import get_supabase_async, require_token_admin, require_actor_admin
+from app.utils.dependencies import get_supabase_async
 from app.utils.database import insert_data, update_data, query_data
 
 router = APIRouter(prefix="/v1/keys", tags=["keys"])
@@ -29,7 +29,7 @@ PUBLIC_KEYS_TABLE = "public_keys"
 async def add_public_key(
     request: Request,
     payload: PublicKeyAddRequest,
-    auth: AuthContext = Depends(require_scope("key.upload")),
+    auth: AuthContext = Depends(require_auth("key.upload")),
     supabase=Depends(get_supabase_async),
 ):
     # auth.account_id supplied by dependency – admin scope replaced by key.upload capability
@@ -89,7 +89,7 @@ async def add_public_key(
 @router.delete("/{key_id}", response_model=MessageResponse, status_code=status.HTTP_202_ACCEPTED)
 async def revoke_key(
     key_id: str,
-    auth: AuthContext = Depends(require_scope("key.upload")),
+    auth: AuthContext = Depends(require_auth("key.upload")),
     supabase=Depends(get_supabase_async),
 ):
     await update_data(
@@ -119,13 +119,13 @@ async def revoke_key(
 @router.get("", response_model=list[PublicKeyResponse])
 async def list_keys(
     include_revoked: int = Query(0, ge=0, le=1),
-    user=Depends(require_actor_admin),  # OAuth users (frontend) can list keys
+    auth: AuthContext = Depends(require_auth(admin_only=True, require_user=True)),  # OAuth users (frontend) can list keys
     supabase=Depends(get_supabase_async),
 ):
     # Get public keys for the account
     query = supabase.table(PUBLIC_KEYS_TABLE).select(
         "key_id,algo,public_key,created_at,revoked_at,user_id"
-    ).eq("account_id", user.account_id)
+    ).eq("account_id", auth.account_id)
     
     if not include_revoked:
         query = query.is_("revoked_at", "null")

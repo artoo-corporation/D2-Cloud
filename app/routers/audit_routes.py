@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse
 
 from app.models import AuditLogRecord, AuthContext
 from app.utils.dependencies import get_supabase_async
-from app.utils.require_scope import require_scope
+from app.utils.auth import require_auth
 from app.utils.database import query_many
 
 router = APIRouter(prefix="/v1/audit", tags=["audit"])
@@ -19,7 +19,7 @@ AUDIT_TABLE = "audit_logs"
 async def list_audit_logs(
     limit: int = Query(100, ge=1, le=1000),
     cursor: str | None = Query(None, description="Cursor '<iso>,<id>' from X-Next-Cursor header"),
-    auth: AuthContext = Depends(require_scope("admin")),
+    auth: AuthContext = Depends(require_auth(admin_only=True)),
     supabase=Depends(get_supabase_async),
 ):
     """Paginated audit log list (newest first) with user name attribution."""

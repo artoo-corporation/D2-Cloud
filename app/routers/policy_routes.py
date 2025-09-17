@@ -27,12 +27,12 @@ from app.models import (
 )
 from app.utils.audit import log_audit_event
 from app.utils.database import insert_data, query_one, query_many, update_data, query_data
-from app.utils.dependencies import get_supabase_async, require_account_admin
+from app.utils.dependencies import get_supabase_async
 from app.utils.security_utils import verify_api_token
 from app.utils.utils import normalize_app_name
 from app.utils.plans import enforce_bundle_poll, get_plan_limit, effective_plan
 import base64
-from app.utils.require_scope import require_scope
+from app.utils.auth import require_auth
 from app.utils.logger import logger
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from app.utils.policy_expiry import is_policy_expired, extract_and_sync_policy_expiry
@@ -50,7 +50,7 @@ async def get_policy_bundle(
     response: Response,
     app_name: str = Query("default", description="App name to retrieve policy for"),
     stage: str = Query("auto", description="Which bundle stage to fetch: published, draft, or auto"),
-    auth: AuthContext = Depends(require_scope("policy.read")),
+    auth: AuthContext = Depends(require_auth("policy.read")),
     if_none_match: str | None = Header(None, alias="If-None-Match"),
     supabase=Depends(get_supabase_async),
 ):
@@ -234,7 +234,7 @@ async def get_policy_bundle(
 @router.put("/draft", response_model=MessageResponse)
 async def upload_policy_draft(
     draft: PolicyDraft,
-    auth: AuthContext = Depends(require_scope("policy.publish")),
+    auth: AuthContext = Depends(require_auth("policy.publish")),
     supabase=Depends(get_supabase_async),
 ):
     logger.info(f"Draft upload for account {auth.account_id}")
@@ -357,7 +357,7 @@ async def publish_policy(
     x_d2_signature: str | None = Header(None, alias="X-D2-Signature"),
     x_d2_key_id: str | None = Header(None, alias="X-D2-Key-Id"),
     if_match: str | None = Header(None, alias="If-Match"),
-    auth: AuthContext = Depends(require_scope("policy.publish")),
+    auth: AuthContext = Depends(require_auth("policy.publish")),
     supabase=Depends(get_supabase_async),
 ):
     # Normalize app name (convert spaces to underscores)
@@ -643,7 +643,7 @@ async def publish_policy(
 async def revoke_policy(
     request: Request,
     app_name: str = Query(..., description="App name to revoke policy for"),
-    auth: AuthContext = Depends(require_scope("policy.revoke")),
+    auth: AuthContext = Depends(require_auth("policy.revoke")),
     supabase=Depends(get_supabase_async),
 ):
     # Normalize app name (convert spaces to underscores)
@@ -684,7 +684,7 @@ async def revoke_policy(
 async def list_policy_versions(
     app_name: str = Query(None, description="Filter by app name"),
     include_bundle: bool = Query(False, description="Include full bundle content for comparison"),
-    auth: AuthContext = Depends(require_scope("policy.read")),
+    auth: AuthContext = Depends(require_auth("policy.read")),
     supabase=Depends(get_supabase_async),
 ):
     """List all published policy versions for an account, ordered by version desc.
@@ -754,7 +754,7 @@ async def list_policy_versions(
 async def revert_policy(
     http_request: Request,
     request: PolicyRevertRequest,
-    auth: AuthContext = Depends(require_scope("policy.revert")),
+    auth: AuthContext = Depends(require_auth("policy.revert")),
     supabase=Depends(get_supabase_async),
 ):
     """Revert to a specific policy version by making it active."""
@@ -819,7 +819,7 @@ async def revert_policy(
 
 @router.get("/list", response_model=list[PolicySummary])
 async def list_policies(
-    auth: AuthContext = Depends(require_scope("policy.read")),
+    auth: AuthContext = Depends(require_auth("policy.read")),
     supabase=Depends(get_supabase_async),
 ):
     """Return **all** policies (draft + published) for the caller's account.
@@ -839,7 +839,7 @@ async def list_policies(
 
 @router.get("/roles-permissions")
 async def list_roles_and_permissions(
-    auth: AuthContext = Depends(require_scope("policy.read")),
+    auth: AuthContext = Depends(require_auth("policy.read")),
     supabase=Depends(get_supabase_async),
 ):
     """Extract all unique roles and permissions from policy bundles for UI suggestions.
@@ -916,7 +916,7 @@ async def list_roles_and_permissions(
 @router.get("/{policy_id}", response_model=PolicySummary)
 async def get_policy_detail(
     policy_id: str,
-    auth: AuthContext = Depends(require_scope("policy.read")),
+    auth: AuthContext = Depends(require_auth("policy.read")),
     supabase=Depends(get_supabase_async),
 ):
     row = await query_one(
@@ -935,7 +935,7 @@ async def update_policy_bundle(
     http_request: Request,
     policy_id: str,
     payload: PolicyBundleUpdate,
-    auth: AuthContext = Depends(require_scope("policy.publish")),
+    auth: AuthContext = Depends(require_auth("policy.publish")),
     supabase=Depends(get_supabase_async),
 ):
     """Update policy bundle content and optionally description from the editor.
@@ -994,7 +994,7 @@ async def update_policy_bundle(
 @router.post("/validate", response_model=PolicyValidationResponse)
 async def validate_policy_bundle(
     validation_request: PolicyValidationRequest,
-    auth: AuthContext = Depends(require_scope("policy.read")),
+    auth: AuthContext = Depends(require_auth("policy.read")),
 ):
     """Validate a policy bundle and provide detailed feedback for the editor.
     
@@ -1083,7 +1083,7 @@ async def validate_policy_bundle(
 
 @router.get("/apps", response_model=list[str])
 async def list_app_names(
-    auth: AuthContext = Depends(require_scope("policy.read")),
+    auth: AuthContext = Depends(require_auth("policy.read")),
     supabase=Depends(get_supabase_async),
 ):
     """Return distinct app names for this account (for token creation dropdown)."""
@@ -1107,7 +1107,7 @@ async def list_app_names(
 
 @router.get("/roles-permissions")
 async def list_roles_and_permissions(
-    auth: AuthContext = Depends(require_scope("policy.read")),
+    auth: AuthContext = Depends(require_auth("policy.read")),
     supabase=Depends(get_supabase_async),
 ):
     """Extract all unique roles and permissions from policy bundles for UI suggestions.

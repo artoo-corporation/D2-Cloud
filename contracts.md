@@ -1,3 +1,43 @@
+## Updates – Auth and Metrics (current)
+
+### Centralized authentication
+- All routes now use a single dependency: `require_auth(...)` from `app/utils/auth.py`.
+- Supported patterns:
+  - `require_auth("policy.read")` – explicit scope
+  - `require_auth(["policy.read", "metrics.read"])` – multiple scopes (all required)
+  - `require_auth(admin_only=True)` – admin via D2 token or Supabase JWT
+  - `require_auth("metrics.read", strict=True)` – no admin wildcard; explicit scopes required
+  - `require_auth(admin_only=True, require_user=True)` – must be a Supabase user session (user_id present)
+- Deprecated/removed: `require_scope`, `require_scope_strict`, `require_actor_admin`, `require_account_admin`, `require_token_admin`.
+
+### Accounts – event sampling
+- `GET /v1/accounts/me` now returns `event_sample: { [eventType]: float }`.
+- Merge precedence: account JSON column > `EVENT_SAMPLE_JSON` env > defaults.
+- Values are clamped to `[0.0, 1.0]`; unknown keys preserved for forward-compat.
+- Initial keys: `authz_decision=1.0`, `tool_invoked=1.0`, `policy_poll_interval=0.1`, `missing_policy=0.5`.
+
+### Metrics endpoints
+- Base: `/v1/metrics` (private dashboard API)
+- Auth: `require_auth("metrics.read", strict=True)`
+- Endpoints:
+  - `GET /v1/metrics/summary`
+  - `GET /v1/metrics/timeseries`
+  - `GET /v1/metrics/top`
+- Backed by Supabase queries; in-app aggregation; gated by `accounts.metrics_enabled`.
+
+### Tokens – performance notes (server-side only)
+- Token verification uses a fast lookup index `api_tokens.token_lookup` derived from the raw token via HMAC(pepper, sha256(token)). The pepper is the AES key `JWK_AES_KEY`.
+- If `token_lookup` is missing for legacy tokens, the first verification does a slow full-scan, then the server backfills `token_lookup` to make subsequent requests fast.
+- Recommended DB index:
+  ```sql
+  create index concurrently if not exists api_tokens_token_lookup_idx on api_tokens (token_lookup);
+  ```
+
+### Operational scripts
+- `scripts/rotate_jwk_aes_key.py` – rotate only the AES key (`JWK_AES_KEY`) and re-encrypt `jwks_keys.private_jwk` rows. Prints the new key for your env. Does not rotate RSA keys.
+- `scripts/rotate_all_jwks.py` – rotate RSA JWKS signing keys and re-sign active policies. Use for scheduled rotation or incident response.
+- `scripts/generate_jwk_aes_key.py` – optional helper to print a base64url 32-byte AES key; not required if using the rotate script.
+
 # D2 Cloud API Contracts
 
 *Last updated: 2025-09-15 – includes dual policy publish responses, role management, app quotas, frontend publishing, policy crafting assistance, and comprehensive audit logging*
@@ -111,9 +151,29 @@ Authorization: Bearer d2_[token_value]
     "event_payload_max_bytes": 1048576
   },
   "metrics_enabled": true,
-  "poll_seconds": 30
+  "poll_seconds": 30,
+  "event_sample": {
+    "authz_decision": 1.0,
+    "tool_invoked": 1.0,
+    "policy_poll_interval": 0.1,
+    "missing_policy": 0.5
+  }
 }
 ```
+
+**Event Sampling Semantics**
+
+- `event_sample` provides server-driven sampling probabilities per event type used by SDKs to throttle raw telemetry volume.
+- Values are floats in [0.0, 1.0]: `1.0` always send, `0.0` never send, `0.5` ~50% of events (client-side randomized).
+- Affects telemetry emission only; it does not affect authorization decisions.
+- Initial keys:
+  - `authz_decision`: keep at 1.0 for accurate allow/deny metrics.
+  - `tool_invoked`: can be reduced to cut noise while retaining attribution.
+  - `policy_poll_interval`: safe to heavily downsample (heartbeat-style).
+  - `missing_policy`: downsample to avoid spikes during incidents.
+- Unknown keys are allowed and preserved; SDKs ignore keys they don’t understand.
+- Merge precedence: account `event_sample` > env `EVENT_SAMPLE_JSON` > defaults. Non-numeric values ignored; numeric values clamped to [0,1].
+- SDKs typically cache `/v1/accounts/me` for ~5 minutes; changes propagate within that window.
 
 **Frontend Usage**:
 ```typescript
@@ -1178,6 +1238,83 @@ The SDK now sends comprehensive threading security events for multi-threaded app
 **Headers** (for pagination):
 ```http
 X-Next-Cursor: "2024-01-01T11:59:59Z,uuid"
+```
+
+### 📈 Metrics (Supabase-backed)
+
+All metrics endpoints require `metrics.read` via strict scope check and `accounts.metrics_enabled = true`.
+
+#### GET /v1/metrics/summary
+
+**Purpose**: Overall summary for a time range.
+
+**Auth**: `metrics.read`
+
+**Query Parameters**:
+- `start`: ISO timestamp (optional; default now-30d)
+- `end`: ISO timestamp (optional; default now)
+
+**Response**:
+```json
+{
+  "start": "2025-01-01T00:00:00Z",
+  "end": "2025-01-31T23:59:59Z",
+  "total_authorizations": 12345,
+  "total_denied": 234,
+  "deny_rate": 0.0189,
+  "unique_tools": 17,
+  "unique_resources": 17,
+  "avg_decision_ms": 12.5,
+  "avg_ingest_lag_ms": 85.2
+}
+```
+
+Notes:
+- Allowed/denied inferred from `tool_invoked`/`authz_decision` payload `decision`/`allowed`.
+- `avg_decision_ms` is computed only if SDK sends `decision_ms`/`decision_time_ms`/`latency_ms`/`duration_ms` in payload.
+
+#### GET /v1/metrics/timeseries
+
+**Purpose**: Allowed vs denied over time buckets.
+
+**Auth**: `metrics.read`
+
+**Query Parameters**:
+- `bucket`: `hour` or `day` (default `day`)
+- `days`: window size (default 7, max 90)
+
+**Response**:
+```json
+{
+  "bucket": "day",
+  "start": "2025-01-24T00:00:00Z",
+  "end": "2025-01-31T00:00:00Z",
+  "points": [
+    { "ts": "2025-01-24T00:00:00Z", "allowed": 120, "denied": 3, "total": 123 }
+  ]
+}
+```
+
+#### GET /v1/metrics/top
+
+**Purpose**: Top-N breakdown by dimension.
+
+**Auth**: `metrics.read`
+
+**Query Parameters**:
+- `dimension`: `tools` | `resources` | `event_type` (default `tools`)
+- `days`: window size (default 30)
+- `n`: top-N size (default 10, max 100)
+
+**Response**:
+```json
+{
+  "dimension": "tools",
+  "start": "2025-01-01T00:00:00Z",
+  "end": "2025-01-31T23:59:59Z",
+  "total": 12345,
+  "items": [ { "key": "weather_api", "count": 3210 } ]
+}
 ```
 
 ---

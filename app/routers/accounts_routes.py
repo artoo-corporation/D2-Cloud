@@ -19,17 +19,18 @@ router = APIRouter(prefix="/v1/accounts", tags=["accounts"])
 
 
 import os  # placed here to avoid polluting top-matter
+import json
 from fastapi import Header, HTTPException
 
 from app.models import AuthContext, MeResponse
 from app.utils.plans import effective_plan, get_plan_limit
 from app.utils.database import query_one
-from app.utils.require_scope import require_scope
+from app.utils.auth import require_auth
 
 
 @router.get("/me", response_model=MeResponse)
 async def get_me(
-    auth: AuthContext = Depends(require_scope("policy.read")),
+    auth: AuthContext = Depends(require_auth("policy.read")),
     supabase=Depends(get_supabase_async),
 ):
     """Return plan, quotas and misc account metadata for the caller."""
@@ -66,12 +67,100 @@ async def get_me(
         "event_payload_max_bytes": get_plan_limit(plan, "max_batch_bytes"),
     }
 
+    # -------------------------------------------------------------------
+    # Event sampling configuration (server-driven SDK sampling)
+    #
+    # Merge strategy (in priority order):
+    #   1) Account-level JSON column `event_sample` (if present)
+    #   2) Env override `EVENT_SAMPLE_JSON` (JSON object)
+    #   3) Hard-coded defaults (below)
+    # Unknown keys are preserved; values are clamped to [0.0, 1.0].
+    #
+    # Semantics:
+    # - Values are sampling probabilities used by SDKs when deciding whether to
+    #   emit a raw telemetry event of a given type. They DO NOT affect the
+    #   underlying authorization decision itself – only whether the event is
+    #   sent to the control plane.
+    # - 1.0  ⇒ always send (no sampling)
+    # - 0.0  ⇒ never send (fully suppressed)
+    # - 0.5  ⇒ ~50% of events emitted (client-side randomised)
+    #
+    # Keys (initial set):
+    # - "authz_decision": Decision outcome for an authorization check. Keep at
+    #   1.0 for accurate allow/deny metrics and troubleshooting. Lowering this
+    #   will reduce fidelity of metrics.
+    # - "tool_invoked": Tool-level invocation events around decisions. Useful
+    #   for debugging and attribution; can be reduced (<1.0) to cut noise.
+    # - "policy_poll_interval": Periodic/heartbeat style events from bundle
+    #   polling. Safe to downsample aggressively (e.g., 0.1) to limit chatter.
+    # - "missing_policy": Emitted when a policy is missing. Can be spiky during
+    #   incidents; downsample to avoid bursts while retaining visibility.
+    #
+    # Behaviour & propagation:
+    # - Merge precedence: account.event_sample > ENV(EVENT_SAMPLE_JSON) > defaults
+    # - Non-numeric values are ignored; numeric values are clamped into [0,1].
+    # - Unknown keys are passed through untouched for forward-compat (SDKs may
+    #   ignore keys they don’t understand).
+    # - SDKs cache /v1/accounts/me for ~5 minutes; changes typically take effect
+    #   within that window on clients.
+    # -------------------------------------------------------------------
+
+    defaults = {
+        "authz_decision": 1.0,
+        "tool_invoked": 1.0,
+        "policy_poll_interval": 0.1,
+        "missing_policy": 0.5,
+    }
+
+    merged: dict[str, float] = {}
+
+    # Start with defaults
+    merged.update(defaults)
+
+    # Env JSON override (optional)
+    env_json = os.getenv("EVENT_SAMPLE_JSON")
+    if env_json:
+        try:
+            env_obj = json.loads(env_json)
+            if isinstance(env_obj, dict):
+                for k, v in env_obj.items():
+                    try:
+                        fv = float(v)
+                        merged[k] = fv
+                    except Exception:
+                        # ignore non-numeric env values
+                        pass
+        except Exception:
+            # ignore bad env JSON
+            pass
+
+    # Account-level per-tenant config (preferred)
+    acct_cfg = account.get("event_sample")
+    if isinstance(acct_cfg, dict):
+        for k, v in acct_cfg.items():
+            try:
+                merged[k] = float(v)
+            except Exception:
+                # ignore non-numeric account values
+                pass
+
+    # Clamp to [0,1]
+    for k, v in list(merged.items()):
+        if not isinstance(v, (int, float)):
+            del merged[k]
+            continue
+        if v < 0.0:
+            merged[k] = 0.0
+        elif v > 1.0:
+            merged[k] = 1.0
+
     return MeResponse(
         plan=plan,
         trial_expires=account.get("trial_expires"),
         quotas=quotas,
         metrics_enabled=account.get("metrics_enabled", False),
         poll_seconds=quotas["poll_sec"],
+        event_sample=merged,
     )
 
 # ---------------------------------------------------------------------------
@@ -80,7 +169,7 @@ async def get_me(
 
 from pydantic import BaseModel, Field
 from app.models.invitations import InvitationRole
-from app.utils.dependencies import require_actor_admin, Actor
+from app.utils.auth import require_auth
 from app.utils.database import update_data, query_one
 from app.models import MessageResponse, AuditAction, AuditStatus
 from app.utils.audit import log_audit_event
@@ -108,7 +197,7 @@ async def update_user_role(
     account_id: str = Path(..., description="Account ID"),
     user_id: str = Path(..., description="User ID whose role is being updated"),
     request: UserRoleUpdateRequest = ...,
-    user: Actor = Depends(require_actor_admin),
+    auth: AuthContext = Depends(require_auth(admin_only=True, require_user=True)),
     supabase=Depends(get_supabase_async),
 ):
     """Update the role of an existing user in the account.
@@ -117,17 +206,15 @@ async def update_user_role(
     endpoint to safeguard against privilege escalation.
     """
 
-    # Enforce Supabase session and account match
-    if user.user_id is None:
-        raise HTTPException(status_code=403, detail="supabase_session_required")
-    if user.account_id != account_id:
+    # Enforce account match (user_id is guaranteed by require_user=True)
+    if auth.account_id != account_id:
         raise HTTPException(status_code=403, detail="account_mismatch")
 
     # Make sure target user exists in this account
     target_user = await query_one(
         supabase,
         "users",
-        match={"user_id": user_id, "account_id": account_id},
+        match={"user_id": user_id, "account_id": auth.account_id},
     )
     if not target_user:
         raise HTTPException(status_code=404, detail="user_not_found")
@@ -152,7 +239,7 @@ async def update_user_role(
         action=AuditAction.user_role_update,
         actor_id=account_id,
         status=AuditStatus.success,
-        user_id=user.user_id,
+        user_id=auth.user_id,
         resource_type="user",
         resource_id=user_id,
         metadata={

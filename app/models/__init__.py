@@ -183,6 +183,7 @@ class MeResponse(BaseModel):
     quotas: Dict[str, int] = Field(default_factory=dict, description="Plan quota limits")
     metrics_enabled: bool
     poll_seconds: int
+    event_sample: Dict[str, float] = Field(default_factory=dict, description="Per-event sampling probabilities [0..1]")
 
 class EventsBatch(BaseModel):
     events: List[Dict[str, Any]]
@@ -375,3 +376,47 @@ class JWKSHistoryResponse(BaseModel):
     keys: List[JWKSKeyHistoryItem] = Field(..., description="List of all keys, newest first")
     total_rotations: int = Field(..., description="Total number of rotations performed")
     overlap_days: int = Field(7, description="Number of days keys overlap before cleanup")
+
+
+# ---------------------------------------------------------------------------
+# Metrics response models (Supabase-backed, aggregation in app layer)
+# ---------------------------------------------------------------------------
+
+
+class MetricsSummaryResponse(BaseModel):
+    start: datetime
+    end: datetime
+    total_authorizations: int
+    total_denied: int
+    deny_rate: float
+    unique_tools: int
+    unique_resources: int
+    avg_decision_ms: float | None = None
+    avg_ingest_lag_ms: float | None = None
+
+
+class TimeseriesPoint(BaseModel):
+    ts: datetime
+    allowed: int
+    denied: int
+    total: int
+
+
+class MetricsTimeseriesResponse(BaseModel):
+    bucket: str  # "hour" | "day"
+    start: datetime
+    end: datetime
+    points: List[TimeseriesPoint]
+
+
+class TopItem(BaseModel):
+    key: str
+    count: int
+
+
+class MetricsTopResponse(BaseModel):
+    dimension: str  # "tools" | "resources" | "event_type"
+    start: datetime
+    end: datetime
+    total: int
+    items: List[TopItem]

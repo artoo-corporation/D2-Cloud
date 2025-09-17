@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import time
 from hashlib import sha256
 from typing import Any, Dict, Union
 
@@ -18,8 +19,8 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from app.utils.dependencies import get_supabase_async
-from app.utils.database import query_one, query_data
-from app.main import APP_ENV
+from app.utils.database import query_one, query_data, update_data
+from app import APP_ENV
 
 API_TOKEN_TABLE = "api_tokens"
 JWKS_TABLE = "jwks_keys"
@@ -29,7 +30,7 @@ autoerror = False if APP_ENV == "development" else True
 # Supabase Auth JWT verification helpers
 # ---------------------------------------------------------------------------
 
-async def verify_supabase_jwt(token: str, admin_only: bool = False) -> str:
+async def verify_supabase_jwt(token: str, admin_only: bool = False, return_claims: bool = False):
     """Validate a Supabase Auth JWT and return the caller's account_id.
 
     Admin enforcement:
@@ -67,7 +68,17 @@ async def verify_supabase_jwt(token: str, admin_only: bool = False) -> str:
         if not user_auth_id:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid_supabase_token")
 
-        # Acquire a supabase client to query the users table
+        # Try to get account_id and role from JWT claims (fast path)
+        account_id = unverified_claims.get("account_id") or unverified_claims.get("user_metadata", {}).get("account_id")
+        role = unverified_claims.get("role") or unverified_claims.get("user_metadata", {}).get("role")
+        
+        # If we have account_id in JWT and don't need admin check, skip DB query entirely
+        if account_id and (not admin_only or role in {"admin", "owner"}):
+            if return_claims:
+                return str(account_id), unverified_claims
+            return str(account_id)
+        
+        # Fall back to database lookup only if needed
         agen = get_supabase_async()
         supabase = await agen.__anext__()  # get first (and only) yield
         try:
@@ -82,16 +93,18 @@ async def verify_supabase_jwt(token: str, admin_only: bool = False) -> str:
                 raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="user_not_found")
 
             row = rows[0]
-            account_id = row.get("account_id") or row.get("org_id")
-            if not account_id:
+            db_account_id = row.get("account_id") or row.get("org_id")
+            if not db_account_id:
                 raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="account_mapping_not_found")
 
             if admin_only:
-                role = row.get("role")
-                if role is not None and role not in {"admin", "owner"}:
+                db_role = row.get("role")
+                if db_role is not None and db_role not in {"admin", "owner"}:
                     raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="admin_required")
 
-            return str(account_id)
+            if return_claims:
+                return str(db_account_id), unverified_claims
+            return str(db_account_id)
         finally:
             close_coro = getattr(supabase, "aclose", None)
             if callable(close_coro):
@@ -132,7 +145,10 @@ def compute_token_lookup(raw_token: str) -> str | None:
     if not key_b64:
         return None
     try:
-        pepper = base64.urlsafe_b64decode(key_b64)
+        # Add padding if needed for base64url decoding (same as _get_aes_key)
+        padding_needed = (4 - len(key_b64) % 4) % 4
+        key_b64_padded = key_b64 + '=' * padding_needed
+        pepper = base64.urlsafe_b64decode(key_b64_padded)
     except Exception:  # noqa: BLE001
         return None
     token_sha = sha256(raw_token.encode()).hexdigest()
@@ -268,6 +284,39 @@ async def verify_api_token(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired")
 
     scopes = row.get("scopes") or []
+
+    # Opportunistic backfill of token_lookup to avoid future full scans
+    try:
+        if lookup is not None and not row.get("token_lookup"):
+            await update_data(
+                supabase,
+                API_TOKEN_TABLE,
+                update_values={"token_lookup": lookup},
+                filters={"token_id": row.get("token_id")},
+            )
+            # Verify backfill
+            try:
+                verify = await query_one(
+                    supabase,
+                    API_TOKEN_TABLE,
+                    match={"token_id": row.get("token_id")},
+                    select_fields="token_id,token_lookup",
+                )
+            except Exception:
+                verify = None
+            logger.info(
+                "auth.token",
+                extra={
+                    "extra": {
+                        "phase": "backfill_lookup",
+                        "token_id": row.get("token_id"),
+                        "lookup_len": len(lookup),
+                        "verified": bool(verify and verify.get("token_lookup")),
+                    }
+                },
+            )
+    except Exception:
+        pass
 
     if admin_only and "admin" not in scopes:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin scope required")

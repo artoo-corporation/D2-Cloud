@@ -1,3 +1,32 @@
+## Recent System Changes (Auth, Metrics, Ops)
+
+### Centralized authentication
+- All routes migrated to `require_auth(...)` in `app/utils/auth.py`.
+- Patterns supported: explicit scopes, admin_only, strict (no wildcard), require_user.
+- Old helpers removed: `require_scope`, `require_scope_strict`, `require_actor_admin`, `require_account_admin`, `require_token_admin`.
+
+### Metrics API
+- New router at `/v1/metrics` with `summary`, `timeseries`, and `top` endpoints.
+- Authorization: `require_auth("metrics.read", strict=True)`.
+- Aggregation via Supabase; gated by `accounts.metrics_enabled`.
+
+### Accounts – event sampling returned by `/v1/accounts/me`
+- `event_sample` object with per-event probabilities in `[0,1]`.
+- Merge order: account JSON > `EVENT_SAMPLE_JSON` env > defaults; values clamped.
+
+### Token verification performance
+- Fast path via `api_tokens.token_lookup` (HMAC(pepper, sha256(token))). Pepper is `JWK_AES_KEY`.
+- Legacy tokens without `token_lookup` will incur one slow full-scan the next time they’re seen; server backfills `token_lookup` to make subsequent requests fast.
+- Suggested DB index: `api_tokens_token_lookup_idx` on `(token_lookup)`.
+
+### Operational scripts
+- `scripts/rotate_jwk_aes_key.py` – rotate only `JWK_AES_KEY` (AES). Re-encrypts `jwks_keys.private_jwk` from OLD to NEW, verifies, and prints the new key. Does not rotate RSA keys.
+- `scripts/rotate_all_jwks.py` – rotate RSA JWKS signing keys and re-sign active policies. Use for incident/scheduled rotation.
+- `scripts/README.md` – full instructions (when/why/how, expectations, indices, logging signals).
+
+### Logging cleanup
+- Removed temporary auth timing logs after performance fixes.
+
 # D2 Cloud Control-Plane – Codebase Reference
 
 *Last updated: 2025-09-04 – includes JWKS rotation automation, JWT structure enhancements, and server tokens*

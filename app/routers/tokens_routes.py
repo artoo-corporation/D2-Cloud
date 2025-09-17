@@ -27,7 +27,8 @@ from app.models import (
 )
 from app.models.scopes import Scope
 from app.utils.audit import log_audit_event
-from app.utils.dependencies import get_supabase_async, require_token_admin, require_actor_admin, Actor
+from app.utils.dependencies import get_supabase_async
+from app.utils.auth import require_auth
 from app.utils.database import insert_data, query_data, query_one, update_data
 from app.utils.security_utils import hash_token, compute_token_lookup, verify_api_token
 from app.utils.utils import normalize_app_name
@@ -61,7 +62,7 @@ async def _token_count(supabase, account_id: str) -> int:
 async def create_token(
     account_id: str = Path(..., description="Target account ID"),
     payload: TokenCreateRequest | None = None,
-    user: Actor = Depends(require_actor_admin),  # Must be Supabase session (user_id present)
+    auth: AuthContext = Depends(require_auth(admin_only=True, require_user=True)),  # Must be Supabase session (user_id present)
     supabase=Depends(get_supabase_async),
 ):
     """Issue a new API token.
@@ -82,10 +83,8 @@ async def create_token(
     • "admin"           – full wildcard (admin-only; includes all above)
     """
 
-    # Enforce Supabase session and account match
-    if user.user_id is None:
-        raise HTTPException(status_code=403, detail="supabase_session_required")
-    if user.account_id != account_id:
+    # Enforce account match (user_id is guaranteed by require_user=True)
+    if auth.account_id != account_id:
         raise HTTPException(status_code=403, detail="account_mismatch")
 
     # Handle assigned_user_id: validate that the target user belongs to the same account
@@ -95,15 +94,15 @@ async def create_token(
         user_check = await query_one(
             supabase,
             "users",
-            match={"user_id": assigned_user_id, "account_id": account_id}
+            match={"user_id": assigned_user_id, "account_id": auth.account_id}
         )
         if not user_check:
             raise HTTPException(status_code=400, detail="assigned_user_not_in_account")
     else:
         # Default to current user
-        assigned_user_id = actor.user_id
+        assigned_user_id = auth.user_id
 
-    existing = await _token_count(supabase, account_id)
+    existing = await _token_count(supabase, auth.account_id)
 
     if existing == 0:
         scopes = ["policy.read"]
@@ -139,10 +138,10 @@ async def create_token(
             "token_sha256": token_sha_hashed,
             "token_name": payload.token_name if payload and payload.token_name else None,
             **({"token_lookup": token_lookup} if token_lookup is not None else {}),
-            "account_id": account_id,
+            "account_id": auth.account_id,
             "scopes": scopes,
             "expires_at": None,
-            "created_by_user_id": actor.user_id,  # Who created the token
+            "created_by_user_id": auth.user_id,  # Who created the token
             "assigned_user_id": assigned_user_id,  # Who owns/uses the token
             "app_name": normalize_app_name(payload.app_name) if payload and payload.app_name else None,
         },
@@ -152,16 +151,16 @@ async def create_token(
     await log_audit_event(
         supabase,
         action=AuditAction.token_create,
-        actor_id=account_id,
+        actor_id=auth.account_id,
         status=AuditStatus.success,
         token_id=token_id,
-        user_id=user.user_id,
+        user_id=auth.user_id,
         resource_type="token",
         resource_id=token_id,
         metadata={
             "token_name": payload.token_name if payload else None,
             "scopes": scopes,
-            "app_name": app_name,
+            "app_name": normalize_app_name(payload.app_name) if payload and payload.app_name else None,
             "assigned_user_id": assigned_user_id,
         },
     )
@@ -187,7 +186,7 @@ async def create_token(
 async def create_server_token(
     account_id: str = Path(..., description="Target account ID"),
     payload: ServerTokenRequest | None = None,
-    user: Actor = Depends(require_actor_admin),  # Must be account admin (can be token or user)
+    auth: AuthContext = Depends(require_auth(admin_only=True)),  # Must be account admin (can be token or user)
     supabase=Depends(get_supabase_async),
 ):
     """Issue a new server API token.
@@ -199,8 +198,8 @@ async def create_server_token(
     • Intended for production services
     """
     
-    # Ensure caller has admin access to the account (but don't require Supabase session)
-    if user.account_id != account_id:
+    # Ensure caller has admin access to the account
+    if auth.account_id != account_id:
         raise HTTPException(status_code=403, detail="account_mismatch")
     
     # Server tokens always get "server" scope (policy.read + event.ingest)
@@ -218,14 +217,14 @@ async def create_server_token(
         "api_tokens",
         {
             "token_id": token_id,
-            "account_id": account_id,
+            "account_id": auth.account_id,
             "token_sha256": hashed_token,  # Column is token_sha256, not token_hash
             "token_lookup": compute_token_lookup(raw_token),  # Column is token_lookup, not lookup
             "scopes": [s.value for s in scopes],
             "token_name": payload.token_name if payload else "Server Token",
             "app_name": payload.app_name if payload else None,
             "assigned_user_id": None,  # Server tokens are not user-assigned
-            "created_by_user_id": user.user_id,  # Track who created the server token
+            "created_by_user_id": auth.user_id,  # Track who created the server token
             "expires_at": None,  # Server tokens don't expire by default
         },
     )
@@ -234,10 +233,10 @@ async def create_server_token(
     await log_audit_event(
         supabase,
         action=AuditAction.token_create,
-        actor_id=account_id,
+        actor_id=auth.account_id,
         status=AuditStatus.success,
         token_id=token_id,
-        user_id=user.user_id,  # Will be None for server tokens, which is fine
+        user_id=auth.user_id,  # Will be None for server tokens, which is fine
         resource_type="token",
         resource_id=token_id,
         metadata={
@@ -263,16 +262,16 @@ async def create_server_token(
 @router.get("/tokens", response_model=list[APITokenResponse])
 async def list_tokens(
     account_id: str = Path(...),
-    user: Actor = Depends(require_actor_admin),
+    auth: AuthContext = Depends(require_auth(admin_only=True)),
     supabase=Depends(get_supabase_async),
 ):
-    if user.account_id != account_id:
+    if auth.account_id != account_id:
         raise HTTPException(status_code=403, detail="account_mismatch")
 
     resp = await query_data(
         supabase,
         API_TOKEN_TABLE,
-        filters={"account_id": account_id},
+        filters={"account_id": auth.account_id},
         select_fields="token_id,token_name,scopes,expires_at,revoked_at,created_by_user_id,created_at",
     )
 
@@ -312,17 +311,17 @@ async def list_tokens(
 async def revoke_token(
     account_id: str = Path(...),
     token_id: str = Path(..., description="Token ID to revoke"),
-    user: Actor = Depends(require_actor_admin),
+    auth: AuthContext = Depends(require_auth(admin_only=True)),
     supabase=Depends(get_supabase_async),
 ):
-    if user.account_id != account_id:
+    if auth.account_id != account_id:
         raise HTTPException(status_code=403, detail="account_mismatch")
 
     await update_data(
         supabase,
         API_TOKEN_TABLE,
         update_values={"revoked_at": datetime.now(timezone.utc)},
-        filters={"account_id": account_id, "token_id": token_id},
+        filters={"account_id": auth.account_id, "token_id": token_id},
         error_message="token_revoke_failed",
     )
 
@@ -330,10 +329,10 @@ async def revoke_token(
     await log_audit_event(
         supabase,
         action=AuditAction.token_revoke,
-        actor_id=account_id,
+        actor_id=auth.account_id,
         status=AuditStatus.success,
         token_id=token_id,
-        user_id=user.user_id,
+        user_id=auth.user_id,
         resource_type="token",
         resource_id=token_id,
     )
@@ -354,19 +353,19 @@ async def revoke_token(
 async def rotate_token(
     account_id: str = Path(...),
     token_id: str = Path(..., description="Token ID to rotate"),
-    user: Actor = Depends(require_actor_admin),
+    auth: AuthContext = Depends(require_auth(admin_only=True)),
     supabase=Depends(get_supabase_async),
 ):
     """Rotate a token: create new token with same settings, revoke old one."""
     
-    if user.account_id != account_id:
+    if auth.account_id != account_id:
         raise HTTPException(status_code=403, detail="account_mismatch")
 
     # Get existing token details
     existing_token = await query_one(
         supabase,
         API_TOKEN_TABLE,
-        match={"account_id": account_id, "token_id": token_id},
+        match={"account_id": auth.account_id, "token_id": token_id},
     )
     
     if not existing_token:
@@ -391,7 +390,7 @@ async def rotate_token(
             "token_sha256": token_sha_hashed,
             "token_name": existing_token.get("token_name"),
             **({"token_lookup": token_lookup} if token_lookup is not None else {}),
-            "account_id": account_id,
+            "account_id": auth.account_id,
             "scopes": existing_token.get("scopes", []),
             "expires_at": None,
             "created_by_user_id": existing_token.get("created_by_user_id"),
@@ -404,7 +403,7 @@ async def rotate_token(
         supabase,
         API_TOKEN_TABLE,
         update_values={"revoked_at": datetime.now(timezone.utc)},
-        filters={"account_id": account_id, "token_id": token_id},
+        filters={"account_id": auth.account_id, "token_id": token_id},
         error_message="token_revoke_failed",
     )
 
@@ -412,7 +411,7 @@ async def rotate_token(
     await log_audit_event(
         supabase,
         action=AuditAction.token_rotate,
-        actor_id=account_id,
+        actor_id=auth.account_id,
         status=AuditStatus.success,
         token_id=new_token_id,  # New token ID
         user_id=existing_token.get("created_by_user_id"),
@@ -477,7 +476,7 @@ from typing import Dict
 @router.get("/users")
 async def list_account_users(
     account_id: str = Path(..., description="Account ID"),
-    user: Actor = Depends(require_actor_admin),
+    auth: AuthContext = Depends(require_auth(admin_only=True, require_user=True)),
     supabase=Depends(get_supabase_async),
 ):
     """List all users in the account for token assignment dropdown.
@@ -485,17 +484,15 @@ async def list_account_users(
     Returns:
         List of users with basic info for frontend dropdowns
     """
-    # Enforce Supabase session and account match
-    if user.user_id is None:
-        raise HTTPException(status_code=403, detail="supabase_session_required")
-    if user.account_id != account_id:
+    # Enforce account match (user_id is guaranteed by require_user=True)
+    if auth.account_id != account_id:
         raise HTTPException(status_code=403, detail="account_mismatch")
 
     # Query users in the account
     resp = await query_data(
         supabase,
         "users",
-        filters={"account_id": account_id},
+        filters={"account_id": auth.account_id},
         select_fields="user_id,email,display_name,full_name"
     )
     

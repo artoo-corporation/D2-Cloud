@@ -11,11 +11,11 @@ from fastapi import APIRouter, Depends, Header, Query, status, Response, Request
 # Rate limiter exported by main.py
 from app.main import limiter
 
-from app.models import MessageResponse, JWKSConfigurationResponse, JWKSRotationResponse, JWKSHistoryResponse, JWKSKeyHistoryItem
+from app.models import MessageResponse, JWKSConfigurationResponse, JWKSRotationResponse, JWKSHistoryResponse, JWKSKeyHistoryItem, AuthContext
 from app.utils.security_utils import generate_rsa_jwk, encrypt_private_jwk, resign_active_policies
 from app.utils.database import insert_data, query_many, query_one
 from app.utils.dependencies import get_supabase_async
-from app.utils.dependencies import require_account_admin
+from app.utils.auth import require_auth
 
 # Public discovery endpoints (no auth)
 public_router = APIRouter(prefix="/.well-known", tags=["jwks-public"])
@@ -83,7 +83,7 @@ async def get_jwks(
 @admin_router.get("/configuration", response_model=JWKSConfigurationResponse)
 async def get_jwks_configuration(
     request: Request,
-    account_id: str = Depends(require_account_admin),
+    auth: AuthContext = Depends(require_auth(admin_only=True)),
     supabase=Depends(get_supabase_async),
 ):
     """Get current JWKS configuration for the authenticated account."""
@@ -92,7 +92,7 @@ async def get_jwks_configuration(
     key_row = await query_one(
         supabase,
         "jwks_keys", 
-        match={"account_id": account_id},
+        match={"account_id": auth.account_id},
         order_by=("created_at", "desc"),
     )
     
@@ -120,7 +120,7 @@ async def get_jwks_configuration(
 
 @admin_router.get("/history", response_model=JWKSHistoryResponse)
 async def get_jwks_history(
-    account_id: str = Depends(require_account_admin),
+    auth: AuthContext = Depends(require_auth(admin_only=True)),
     supabase=Depends(get_supabase_async),
 ):
     """Get complete JWKS rotation history for the authenticated account."""
@@ -129,7 +129,7 @@ async def get_jwks_history(
     rows = await query_many(
         supabase,
         "jwks_keys",
-        match={"account_id": account_id},
+        match={"account_id": auth.account_id},
         order_by=("created_at", "desc"),
         select_fields="kid,public_jwk,created_at,expires_at",
     )
@@ -182,7 +182,7 @@ async def automated_rotation_workflow(
         
         # Phase 1: Re-sign all active policies with new key
         resign_result = await resign_active_policies(
-            account_id=account_id,
+            account_id=auth.account_id,
             new_kid=new_kid,
             rotation_id=rotation_id,
             supabase=supabase
@@ -226,7 +226,7 @@ async def cleanup_old_jwks_keys(account_id: str, new_kid: str, rotation_id: str,
         old_keys = await query_many(
             supabase,
             "jwks_keys",
-            match={"account_id": account_id},
+            match={"account_id": auth.account_id},
             select_fields="id,kid,created_at",
         )
         
@@ -261,21 +261,21 @@ async def log_rotation_failure(account_id: str, rotation_id: str, error: str, su
 @admin_router.post("/rotate", response_model=JWKSRotationResponse, status_code=status.HTTP_201_CREATED)
 async def rotate_jwk(
     background_tasks: BackgroundTasks,
-    account_id: str = Depends(require_account_admin),
+    auth: AuthContext = Depends(require_auth(admin_only=True)),
     supabase=Depends(get_supabase_async),
 ):
     """Fully automated JWKS rotation with zero disruption."""
     jwk_pair = generate_rsa_jwk()
     new_kid = str(uuid.uuid4())
     rotation_time = datetime.now(timezone.utc)
-    rotation_id = f"rot_{account_id}_{rotation_time.strftime('%Y%m%d_%H%M%S')}"
+    rotation_id = f"rot_{auth.account_id}_{rotation_time.strftime('%Y%m%d_%H%M%S')}"
 
     # Store new key (old key remains for overlap)
     await insert_data(
         supabase,
         "jwks_keys",
         {
-            "account_id": account_id,
+            "account_id": auth.account_id,
             "kid": new_kid,
             "public_jwk": jwk_pair["public"],
             "private_jwk": encrypt_private_jwk(jwk_pair["private"]),
@@ -285,7 +285,7 @@ async def rotate_jwk(
     # Trigger automated background workflow
     background_tasks.add_task(
         automated_rotation_workflow,
-        account_id=account_id,
+        account_id=auth.account_id,
         new_kid=new_kid,
         rotation_id=rotation_id,
         supabase=supabase

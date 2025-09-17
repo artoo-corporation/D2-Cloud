@@ -14,7 +14,7 @@ from app.utils.audit import log_audit_event
 from app.utils.database import query_one
 from app.utils.dependencies import get_supabase_async
 from app.utils.plans import effective_plan, enforce_event_limits
-from app.utils.require_scope import require_scope
+from app.utils.auth import require_auth
 from datetime import datetime, timezone
 
 router = APIRouter(prefix="/v1", tags=["events"])
@@ -135,7 +135,7 @@ async def _create_audit_from_sdk_event(supabase, account_id: str, single_event, 
 async def ingest_events(
     request: Request,
     batch: EventIngest,  # Now expects batched events
-    auth: AuthContext = Depends(require_scope("event.ingest")),
+    auth: AuthContext = Depends(require_auth("event.ingest")),
     supabase=Depends(get_supabase_async),
 ):
     # auth.account_id is provided by dependency
@@ -209,7 +209,7 @@ async def ingest_events(
 async def list_events(
     limit: int = Query(100, ge=1, le=1000),
     cursor: str | None = Query(None, description="Cursor of form '<iso>,<uuid>' from X-Next-Cursor header"),
-    auth: AuthContext = Depends(require_scope("metrics.read")),
+    auth: AuthContext = Depends(require_auth("metrics.read")),
     supabase=Depends(get_supabase_async),
 ):
     # Build query manually to support compound cursor
