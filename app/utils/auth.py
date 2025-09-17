@@ -97,13 +97,10 @@ async def _authenticate_token(
         user_id = claims.get("sub")
         role = claims.get("role") or claims.get("user_metadata", {}).get("role")
         
-        # Only check database if JWT role is not a custom application role
-        if role not in {"admin", "owner", "dev", "member", "authenticated"} and user_id is not None:
-            role_row = await query_one(supabase, "users", match={"user_id": user_id})
-            db_role = (role_row or {}).get("role")
-            # Prioritize database role if it exists
-            if db_role:
-                role = db_role
+        # Use database role if it was fetched by verify_supabase_jwt
+        db_role = claims.get("db_role")
+        if db_role:
+            role = db_role
         
         # Map role to scopes
         if role in {"admin", "owner"}:

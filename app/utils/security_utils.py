@@ -103,6 +103,10 @@ async def verify_supabase_jwt(token: str, admin_only: bool = False, return_claim
                     raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="admin_required")
 
             if return_claims:
+                # Include database role in claims to avoid duplicate lookups
+                db_role = row.get("role")
+                if db_role:
+                    unverified_claims["db_role"] = db_role
                 return str(db_account_id), unverified_claims
             return str(db_account_id)
         finally:
