@@ -89,15 +89,27 @@ async def verify_supabase_jwt(token: str, admin_only: bool = False, return_claim
         if not user_auth_id:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid_supabase_token")
 
-        # Try to get account_id and role from JWT claims (fast path)
-        account_id = unverified_claims.get("account_id") or unverified_claims.get("user_metadata", {}).get("account_id")
+        # For Supabase OAuth JWTs, use the user_id (sub) directly as account_id
+        # This avoids database lookups for trusted OAuth tokens
+        user_id = unverified_claims.get("sub")
+        
+        # Try to get role from JWT claims for admin checks
         role = unverified_claims.get("role") or unverified_claims.get("user_metadata", {}).get("role")
         
-        # If we have account_id in JWT and don't need admin check, skip DB query entirely
-        if account_id and (not admin_only or role in {"admin", "owner"}):
+        # For OAuth JWTs, we trust the token and skip DB lookup entirely
+        # Only do admin check if explicitly required and we don't have role in JWT
+        if admin_only and not role:
+            # If admin_only is required but no role in JWT, we need to check the database
+            # This should be rare for properly configured OAuth flows
+            pass  # Fall through to database lookup
+        else:
+            # Admin check with JWT role (if needed)
+            if admin_only and role not in {"admin", "owner"}:
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="admin_required")
+            
             if return_claims:
-                return str(account_id), unverified_claims
-            return str(account_id)
+                return str(user_id), unverified_claims
+            return str(user_id)
         
         # Fall back to database lookup only if needed
         agen = get_supabase_async()
