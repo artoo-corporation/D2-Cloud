@@ -111,47 +111,10 @@ async def verify_supabase_jwt(token: str, admin_only: bool = False, return_claim
                 return str(user_id), unverified_claims
             return str(user_id)
         
-        # Fall back to database lookup only if needed
-        agen = get_supabase_async()
-        supabase = await _safe_supabase_call(
-            agen.__anext__(),  # get first (and only) yield
-            detail="supabase_connection_failed",
-        )
-        try:
-            resp = await _safe_supabase_call(
-                query_data(
-                    supabase,
-                    table_name="users",
-                    filters={"user_id": user_auth_id},
-                    select_fields="*",
-                ),
-                detail="supabase_users_unreachable",
-            )
-            rows = getattr(resp, "data", None) or []
-            if not rows:
-                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="user_not_found")
-
-            row = rows[0]
-            db_account_id = row.get("account_id") or row.get("org_id")
-            if not db_account_id:
-                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="account_mapping_not_found")
-
-            if admin_only:
-                db_role = row.get("role")
-                if db_role is not None and db_role not in {"admin", "owner"}:
-                    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="admin_required")
-
-            if return_claims:
-                # Include database role in claims to avoid duplicate lookups
-                db_role = row.get("role")
-                if db_role:
-                    unverified_claims["db_role"] = db_role
-                return str(db_account_id), unverified_claims
-            return str(db_account_id)
-        finally:
-            close_coro = getattr(supabase, "aclose", None)
-            if callable(close_coro):
-                await close_coro()
+        # If we get here, it means admin_only=True but no role in JWT
+        # For trusted OAuth tokens, we should NEVER do database lookups
+        # If admin role is required but not in JWT, reject the request
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="admin_role_not_in_jwt")
     except HTTPException:
         # Re-raise HTTP exceptions (like 503 from _safe_supabase_call) without modification
         raise
