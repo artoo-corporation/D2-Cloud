@@ -12,6 +12,7 @@ import json
 import os
 import bcrypt
 import hmac
+import inspect
 
 from fastapi import HTTPException, status
 from jose import jwk as jose_jwk, jwt as jose_jwt
@@ -21,6 +22,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from app.utils.dependencies import get_supabase_async
 from app.utils.database import query_one, query_data, update_data
 from app import APP_ENV
+from httpx import HTTPError
 
 API_TOKEN_TABLE = "api_tokens"
 JWKS_TABLE = "jwks_keys"
@@ -82,11 +84,14 @@ async def verify_supabase_jwt(token: str, admin_only: bool = False, return_claim
         agen = get_supabase_async()
         supabase = await agen.__anext__()  # get first (and only) yield
         try:
-            resp = await query_data(
-                supabase,
-                table_name="users",
-                filters={"user_id": user_auth_id},
-                select_fields="*",
+            resp = await _safe_supabase_call(
+                query_data(
+                    supabase,
+                    table_name="users",
+                    filters={"user_id": user_auth_id},
+                    select_fields="*",
+                ),
+                detail="supabase_users_unreachable",
             )
             rows = getattr(resp, "data", None) or []
             if not rows:
@@ -617,3 +622,15 @@ async def resign_active_policies(
         "errors": errors,
         "rotation_id": rotation_id,
     } 
+
+
+async def _safe_supabase_call(coro, *, detail: str):
+    """Await a Supabase async call and translate low-level network errors into HTTP 503.
+
+    Any httpx network-layer error gets mapped to a 503 so that callers don't
+    surface opaque 500s to clients.
+    """
+    try:
+        return await coro if inspect.isawaitable(coro) else coro  # type: ignore[misc]
+    except HTTPError as exc:  # pragma: no cover – network only
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=detail) from exc 
