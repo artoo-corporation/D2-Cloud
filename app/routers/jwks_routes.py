@@ -101,7 +101,7 @@ async def get_jwks_configuration(
     
     # Construct the JWKS URL based on the current request
     base_url = f"{request.url.scheme}://{request.headers.get('host', request.url.netloc)}"
-    jwks_url = f"{base_url}/.well-known/jwks.json?account_id={account_id}"
+    jwks_url = f"{base_url}/.well-known/jwks.json?account_id={auth.account_id}"
     
     return JWKSConfigurationResponse(
         current_key_id=str(key_row["kid"]),  # Convert UUID to string
