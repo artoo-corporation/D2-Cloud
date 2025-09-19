@@ -33,14 +33,18 @@ autoerror = False if APP_ENV == "development" else True
 # ---------------------------------------------------------------------------
 
 async def _safe_supabase_call(coro, *, detail: str):
-    """Await a Supabase async call and translate low-level network errors into HTTP 503.
+    """Await a Supabase async call and translate network/database errors into HTTP 503.
 
-    Any httpx network-layer error gets mapped to a 503 so that callers don't
-    surface opaque 500s to clients.
+    Any network, connection, or database error gets mapped to a 503 so that callers don't
+    surface opaque 500s to clients. Only catches non-HTTP exceptions.
     """
     try:
         return await coro if inspect.isawaitable(coro) else coro  # type: ignore[misc]
-    except HTTPError as exc:  # pragma: no cover – network only
+    except HTTPException:
+        # Re-raise HTTP exceptions (401, 403, 404, etc.) - these are intentional
+        raise
+    except Exception as exc:  # pragma: no cover – network/database only
+        # Catch all other exceptions (HTTPError, postgrest errors, connection errors, etc.)
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=detail) from exc
 
 # ---------------------------------------------------------------------------
@@ -97,7 +101,10 @@ async def verify_supabase_jwt(token: str, admin_only: bool = False, return_claim
         
         # Fall back to database lookup only if needed
         agen = get_supabase_async()
-        supabase = await agen.__anext__()  # get first (and only) yield
+        supabase = await _safe_supabase_call(
+            agen.__anext__(),  # get first (and only) yield
+            detail="supabase_connection_failed",
+        )
         try:
             resp = await _safe_supabase_call(
                 query_data(
