@@ -182,7 +182,7 @@ async def automated_rotation_workflow(
         
         # Phase 1: Re-sign all active policies with new key
         resign_result = await resign_active_policies(
-            account_id=auth.account_id,
+            account_id=account_id,
             new_kid=new_kid,
             rotation_id=rotation_id,
             supabase=supabase
@@ -226,7 +226,7 @@ async def cleanup_old_jwks_keys(account_id: str, new_kid: str, rotation_id: str,
         old_keys = await query_many(
             supabase,
             "jwks_keys",
-            match={"account_id": auth.account_id},
+            match={"account_id": account_id},
             select_fields="id,kid,created_at",
         )
         

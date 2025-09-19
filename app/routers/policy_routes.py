@@ -994,8 +994,8 @@ async def update_policy_bundle(
         action=AuditAction.policy_update,
         actor_id=auth.account_id,
         status=AuditStatus.success,
-        token_id=getattr(http_request.state, "token_id", None),
-        user_id=getattr(http_request.state, "user_id", None),
+        token_id=auth.token_id,
+        user_id=auth.user_id,
         version=policy_row.get("version"),
     )
 
