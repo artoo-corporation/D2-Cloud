@@ -29,6 +29,21 @@ JWKS_TABLE = "jwks_keys"
 autoerror = False if APP_ENV == "development" else True
 
 # ---------------------------------------------------------------------------
+# Helper for safe Supabase calls
+# ---------------------------------------------------------------------------
+
+async def _safe_supabase_call(coro, *, detail: str):
+    """Await a Supabase async call and translate low-level network errors into HTTP 503.
+
+    Any httpx network-layer error gets mapped to a 503 so that callers don't
+    surface opaque 500s to clients.
+    """
+    try:
+        return await coro if inspect.isawaitable(coro) else coro  # type: ignore[misc]
+    except HTTPError as exc:  # pragma: no cover – network only
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=detail) from exc
+
+# ---------------------------------------------------------------------------
 # Supabase Auth JWT verification helpers
 # ---------------------------------------------------------------------------
 
@@ -257,15 +272,18 @@ async def verify_api_token(
         try:
             from app.utils.audit import log_audit_event
             from app.models import AuditAction, AuditStatus
-            await log_audit_event(
-                supabase,
-                action=AuditAction.auth_failure,
-                actor_id="unknown",  # No account context yet
-                status=AuditStatus.failure,
-                metadata={
-                    "reason": "invalid_token",
-                    "token_prefix": token[:8] + "..." if len(token) > 8 else token,
-                },
+            await _safe_supabase_call(
+                log_audit_event(
+                    supabase,
+                    action=AuditAction.auth_failure,
+                    actor_id="unknown",  # No account context yet
+                    status=AuditStatus.failure,
+                    metadata={
+                        "reason": "invalid_token",
+                        "token_prefix": token[:8] + "..." if len(token) > 8 else token,
+                    },
+                ),
+                detail="supabase_audit_unreachable",
             )
         except Exception:
             pass  # Don't let audit logging break auth
@@ -277,16 +295,19 @@ async def verify_api_token(
         try:
             from app.utils.audit import log_audit_event
             from app.models import AuditAction, AuditStatus
-            await log_audit_event(
-                supabase,
-                action=AuditAction.token_revoked,
-                actor_id=row.get("account_id", "unknown"),
-                status=AuditStatus.denied,
-                token_id=row.get("token_id"),
-                metadata={
-                    "reason": "token_revoked",
-                    "revoked_at": row.get("revoked_at"),
-                },
+            await _safe_supabase_call(
+                log_audit_event(
+                    supabase,
+                    action=AuditAction.token_revoked,
+                    actor_id=row.get("account_id", "unknown"),
+                    status=AuditStatus.denied,
+                    token_id=row.get("token_id"),
+                    metadata={
+                        "reason": "token_revoked",
+                        "revoked_at": row.get("revoked_at"),
+                    },
+                ),
+                detail="supabase_audit_unreachable",
             )
         except Exception:
             pass
@@ -297,16 +318,19 @@ async def verify_api_token(
         try:
             from app.utils.audit import log_audit_event
             from app.models import AuditAction, AuditStatus
-            await log_audit_event(
-                supabase,
-                action=AuditAction.token_expired,
-                actor_id=row.get("account_id", "unknown"),
-                status=AuditStatus.denied,
-                token_id=row.get("token_id"),
-                metadata={
-                    "reason": "token_expired",
-                    "expires_at": row.get("expires_at"),
-                },
+            await _safe_supabase_call(
+                log_audit_event(
+                    supabase,
+                    action=AuditAction.token_expired,
+                    actor_id=row.get("account_id", "unknown"),
+                    status=AuditStatus.denied,
+                    token_id=row.get("token_id"),
+                    metadata={
+                        "reason": "token_expired",
+                        "expires_at": row.get("expires_at"),
+                    },
+                ),
+                detail="supabase_audit_unreachable",
             )
         except Exception:
             pass
@@ -631,15 +655,3 @@ async def resign_active_policies(
         "errors": errors,
         "rotation_id": rotation_id,
     } 
-
-
-async def _safe_supabase_call(coro, *, detail: str):
-    """Await a Supabase async call and translate low-level network errors into HTTP 503.
-
-    Any httpx network-layer error gets mapped to a 503 so that callers don't
-    surface opaque 500s to clients.
-    """
-    try:
-        return await coro if inspect.isawaitable(coro) else coro  # type: ignore[misc]
-    except HTTPError as exc:  # pragma: no cover – network only
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=detail) from exc 

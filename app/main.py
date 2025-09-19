@@ -92,6 +92,11 @@ def create_app() -> FastAPI:  # noqa: C901
     @app.exception_handler(Exception)
     async def log_unhandled_exceptions(request: Request, exc: Exception):
         """Log full traceback for any unhandled exception that would become a 500."""
+        # Skip HTTPException - those are intentional business logic (401, 404, etc.)
+        if isinstance(exc, HTTPException):
+            raise exc
+            
+        # Log only truly unhandled errors
         error_logger = logging.getLogger("uvicorn.error")
         error_logger.error(
             "UNHANDLED %s at %s %s\n%s",
