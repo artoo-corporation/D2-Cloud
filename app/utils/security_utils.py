@@ -205,11 +205,14 @@ async def verify_api_token(
     lookup = compute_token_lookup(token)
     if lookup is not None:
         # Try fast-path by keyed lookup
-        resp = await query_data(
-            supabase,
-            API_TOKEN_TABLE,
-            filters={"token_lookup": lookup},
-            select_fields="token_id,token_sha256,scopes,account_id,expires_at,revoked_at,app_name,created_by_user_id",
+        resp = await _safe_supabase_call(
+            query_data(
+                supabase,
+                API_TOKEN_TABLE,
+                filters={"token_lookup": lookup},
+                select_fields="token_id,token_sha256,scopes,account_id,expires_at,revoked_at,app_name,created_by_user_id",
+            ),
+            detail="supabase_tokens_unreachable",
         )
         for candidate in getattr(resp, "data", []) or []:
             stored_hash = candidate.get("token_sha256", "")
@@ -219,11 +222,14 @@ async def verify_api_token(
                     break
     if row is None:
         # Fallback: full scan (backward compatibility, slower)
-        resp = await query_data(
-            supabase,
-            API_TOKEN_TABLE,
-            filters={},
-            select_fields="token_id,token_sha256,scopes,account_id,expires_at,revoked_at,app_name,created_by_user_id",
+        resp = await _safe_supabase_call(
+            query_data(
+                supabase,
+                API_TOKEN_TABLE,
+                filters={},
+                select_fields="token_id,token_sha256,scopes,account_id,expires_at,revoked_at,app_name,created_by_user_id",
+            ),
+            detail="supabase_tokens_unreachable",
         )
         for candidate in getattr(resp, "data", []) or []:
             stored_hash = candidate.get("token_sha256", "")
@@ -233,11 +239,14 @@ async def verify_api_token(
                     # Opportunistic backfill: if token_lookup is missing, update it
                     if lookup is not None and not candidate.get("token_lookup"):
                         try:
-                            await update_data(
-                                supabase,
-                                API_TOKEN_TABLE,
-                                match={"token_id": candidate["token_id"]},
-                                updates={"token_lookup": lookup}
+                            await _safe_supabase_call(
+                                update_data(
+                                    supabase,
+                                    API_TOKEN_TABLE,
+                                    match={"token_id": candidate["token_id"]},
+                                    updates={"token_lookup": lookup}
+                                ),
+                                detail="supabase_tokens_unreachable",
                             )
                         except Exception:
                             pass  # Don't let backfill break auth

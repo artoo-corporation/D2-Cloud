@@ -8,12 +8,14 @@ expects (detects `app` attribute).
 from __future__ import annotations
 
 import os
+import logging
+import traceback
 from dotenv import load_dotenv
 from contextvars import ContextVar
 from time import perf_counter
 from typing import Callable, Awaitable, Dict, Any
 
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Request, Response, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from slowapi import Limiter
@@ -85,6 +87,21 @@ def create_app() -> FastAPI:  # noqa: C901
     from slowapi import _rate_limit_exceeded_handler
 
     app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+    
+    # Global exception handler - logs full tracebacks for any unhandled 500s
+    @app.exception_handler(Exception)
+    async def log_unhandled_exceptions(request: Request, exc: Exception):
+        """Log full traceback for any unhandled exception that would become a 500."""
+        error_logger = logging.getLogger("uvicorn.error")
+        error_logger.error(
+            "UNHANDLED %s at %s %s\n%s",
+            type(exc).__name__,
+            request.method,
+            request.url.path,
+            "".join(traceback.format_tb(exc.__traceback__))
+        )
+        # Re-raise so FastAPI still returns the appropriate status code
+        raise exc
 
     # -------------------------------------------------------------------
     # Private-API CORS (env-driven allow-list)
