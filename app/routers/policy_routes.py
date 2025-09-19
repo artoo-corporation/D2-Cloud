@@ -564,16 +564,7 @@ async def publish_policy(
     
     # policy_expiry_str already set from server-side enforcement above
 
-    # First, deactivate any currently active policy for this account
-    if latest_published:
-        await update_data(
-            supabase,
-            POLICY_TABLE,
-            keys={"account_id": auth.account_id, "app_name": app_name, "is_draft": False, "active": True},
-            values={"active": False},
-        )
-
-    # Then publish the new policy as active
+    # First publish the new policy as active
     await update_data(
         supabase,
         POLICY_TABLE,
@@ -589,6 +580,21 @@ async def publish_policy(
             "app_name": app_name,
             },
         )
+
+    # Then atomically deactivate all other active policies for this account/app
+    # This prevents race conditions by ensuring only one policy is active
+    await update_data(
+        supabase,
+        POLICY_TABLE,
+        keys={
+            "account_id": auth.account_id, 
+            "app_name": app_name, 
+            "is_draft": False, 
+            "active": True,
+            "id": ("neq", draft_row["id"])  # Exclude the policy we just activated
+        },
+        values={"active": False},
+    )
 
     # Build response with JWS (consistent with GET /bundle endpoint)
     response = PolicyPublishResponse(
@@ -776,11 +782,16 @@ async def revert_policy(
     if target_policy.get("active"):
         raise HTTPException(status_code=409, detail="Policy version is already active")
     
-    # Deactivate current active policy
+    # Find and deactivate the currently active policy for this app
     current_active = await query_one(
         supabase,
         POLICY_TABLE,
-        match={"account_id": auth.account_id, "is_draft": False, "active": True},
+        match={
+            "account_id": auth.account_id, 
+            "app_name": target_policy["app_name"], 
+            "is_draft": False, 
+            "active": True
+        },
     )
     
     if current_active:
