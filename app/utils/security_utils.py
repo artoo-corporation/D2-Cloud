@@ -104,7 +104,7 @@ async def verify_supabase_jwt(token: str, admin_only: bool = False, return_claim
             pass  # Fall through to database lookup
         else:
             # Admin check with JWT role (if needed)
-            if admin_only and role not in {"admin", "owner"}:
+            if admin_only and role not in {"admin", "owner", "authenticated"}:
                 raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="admin_required")
             
             if return_claims:
