@@ -50,7 +50,8 @@ async def create_invitation(
     # Enforce account access and admin role
     if auth.account_id != account_id:
         raise HTTPException(status_code=403, detail="account_mismatch")
-    if user.user_id is None:
+    # Ensure the caller is an authenticated Supabase user (not just an API token)
+    if auth.user_id is None:
         raise HTTPException(status_code=403, detail="supabase_session_required")
     
     # Check if user already exists in the account
