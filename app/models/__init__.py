@@ -141,9 +141,11 @@ class AuditStatus(str, Enum):
 # ---------------------------------------------------------------------------
 
 class BaseResponse(BaseModel):
-    class Config:
-        orm_mode = True
-        json_schema_extra = {"example": {"message": "OK"}}
+    # Pydantic v2 compatible: enable attribute access on ORM objects
+    model_config = {
+        "from_attributes": True,
+        "json_schema_extra": {"example": {"message": "OK"}},
+    }
 
 class MessageResponse(BaseResponse):
     message: str = Field(..., example="OK")
