@@ -133,8 +133,9 @@ async def verify_supabase_jwt(token: str, admin_only: bool = False, return_claim
             close_coro = getattr(supabase, "aclose", None)
             if callable(close_coro):
                 await close_coro()
-    except HTTPException as http_exc:
-        raise http_exc
+    except HTTPException:
+        # Re-raise HTTP exceptions (like 503 from _safe_supabase_call) without modification
+        raise
     except Exception as e:
         # Include the actual error in development for debugging
         if APP_ENV == "development":
