@@ -103,7 +103,7 @@ async def _authenticate_token(
             role = db_role
         
         # Map role to scopes
-        if role in {"admin", "owner"}:
+        if role in {"admin", "owner", "authenticated"}:
             if requirement.strict:
                 # Explicit scopes for strict mode
                 scopes = [
