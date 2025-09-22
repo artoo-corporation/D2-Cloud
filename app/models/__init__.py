@@ -313,9 +313,9 @@ class PolicySummary(BaseModel):
     version: int
     active: bool
     is_draft: bool
-    published_at: datetime | None = None
-    expires: datetime | None = None
-    revocation_time: datetime | None = None
+    published_at: Optional[datetime] = None
+    expires: Optional[datetime] = None
+    revocation_time: Optional[datetime] = None
     is_revoked: bool = False
     bundle: dict | None = None
 
