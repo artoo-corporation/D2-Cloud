@@ -17,7 +17,7 @@ from importlib import import_module
 from typing import Any, Dict, List, Optional
 from dataclasses import dataclass
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, validator
 
 # External enums -------------------------------------------------------------
 from app.models.scopes import Scope
@@ -422,3 +422,40 @@ class MetricsTopResponse(BaseModel):
     end: datetime
     total: int
     items: List[TopItem]
+
+
+# ---------------------------------------------------------------------------
+# Lead generation models
+# ---------------------------------------------------------------------------
+
+class LeadRequest(BaseModel):
+    email: str = Field(..., description="Email address of the lead")
+    company_name: str = Field(..., description="Company name")
+    ai_agents_description: str = Field(..., description="Description of AI agents problems/use case")
+
+    @validator('email')
+    def validate_email(cls, v):
+        if not v or '@' not in v:
+            raise ValueError('Valid email address required')
+        return v.strip().lower()
+    
+    @validator('company_name')
+    def validate_company_name(cls, v):
+        if not v or len(v.strip()) < 2:
+            raise ValueError('Company name must be at least 2 characters')
+        return v.strip()
+    
+    @validator('ai_agents_description')
+    def validate_description(cls, v):
+        if not v or len(v.strip()) < 10:
+            raise ValueError('Description must be at least 10 characters')
+        return v.strip()
+
+
+class LeadResponse(BaseModel):
+    id: str
+    email: str
+    company_name: str
+    ai_agents_description: str
+    created_at: datetime
+    updated_at: datetime

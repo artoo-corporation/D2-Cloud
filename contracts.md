@@ -1851,4 +1851,60 @@ process.env.D2_POLICY_URL = 'https://api.d2cloud.com/v1/policy/bundle';
 - Use debouncing for policy validation
 - Cache static data (scopes, app names)
 
+---
+
+## Lead Generation API
+
+### POST /public/v1/leads/
+
+**Purpose**: Submit lead information from contact forms (no authentication required)
+
+**Request**:
+```json
+{
+  "email": "john@acme.com",
+  "company_name": "Acme Corp", 
+  "ai_agents_description": "We need help securing our AI agents that access customer databases and external APIs. Currently struggling with permission management and audit trails."
+}
+```
+
+**Validation Rules**:
+- `email`: Must be valid email format, automatically converted to lowercase
+- `company_name`: Minimum 2 characters, whitespace trimmed
+- `ai_agents_description`: Minimum 10 characters, whitespace trimmed
+
+**Success Response** (201 Created):
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "email": "john@acme.com",
+  "company_name": "Acme Corp",
+  "ai_agents_description": "We need help securing our AI agents...",
+  "created_at": "2025-09-19T12:00:00Z",
+  "updated_at": "2025-09-19T12:00:00Z"
+}
+```
+
+**Duplicate Handling**: If email already exists, returns the existing lead (same 201 status)
+
+**Error Responses**:
+- `422 Validation Error`: Invalid input data
+- `500 Internal Server Error`: Database/server issues
+
+**CORS**: Fully enabled for all origins on public endpoints
+
+### GET /public/v1/leads/
+
+**Purpose**: List all leads (for admin/testing purposes)
+
+**Response**: Array of lead objects
+
+### GET /public/v1/leads/health
+
+**Purpose**: Health check for leads service
+
+**Response**: `{"status": "healthy", "service": "leads"}`
+
+---
+
 This document should provide everything needed for comprehensive frontend development against the D2 Cloud API.

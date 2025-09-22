@@ -29,10 +29,9 @@ def _collect_origins() -> list[str]:
     if not origins:
         origins.extend(
             ["https://artoo.love", 
-            "http://localhost:3000", 
             "https://d2-dashboard.artoo.love",
-            "localhost:3000",
-            "127.0.0.1:3000",]
+            # "http://localhost:3000"
+            ]
         )
     return origins
 

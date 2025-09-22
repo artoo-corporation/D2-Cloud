@@ -139,7 +139,7 @@ def create_app() -> FastAPI:  # noqa: C901
     public_app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
-        allow_methods=["GET", "OPTIONS"],
+        allow_methods=["GET", "POST", "OPTIONS"],
         allow_headers=["*"],
         max_age=600,
     )
@@ -150,6 +150,10 @@ def create_app() -> FastAPI:  # noqa: C901
     # standard location.
     public_app.include_router(jwks_public_router)
     app.include_router(jwks_public_router)
+    
+    # Add leads router to public app (no auth required for lead generation)
+    from app.routers.leads_routes import router as leads_router
+    public_app.include_router(leads_router)
 
     # Mount at /public (eg. /public/.well-known/jwks.json)
     app.mount("/public", public_app)
