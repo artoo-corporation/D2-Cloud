@@ -656,21 +656,39 @@ async def revoke_policy(
     app_name = normalize_app_name(app_name)
     
     logger.info(f"Revoking policy for app '{app_name}' in account {auth.account_id}")
-    # Find the currently active published policy for this app
-    active_policy = await query_one(
-        supabase, POLICY_TABLE, 
-        match={"account_id": auth.account_id, "app_name": app_name, "is_draft": False, "active": True}
-    )
-    if not active_policy:
-        raise HTTPException(status_code=404, detail=f"No active policy found to revoke for app '{app_name}'")
+    # Revoke ALL published versions (is_draft = False) for this app
+    now_ts = datetime.now(timezone.utc)
 
     await update_data(
         supabase,
         POLICY_TABLE,
-        keys={"id": active_policy["id"]},
-        values={"revocation_time": datetime.now(timezone.utc),
-               "is_revoked": True,
-               "active": False},
+        filters={
+            "account_id": auth.account_id,
+            "app_name": app_name,
+            "is_draft": False,
+            "is_revoked": False,
+        },
+        update_values={
+            "revocation_time": now_ts,
+            "is_revoked": True,
+            "active": False,
+        },
+        error_message="policy_revoke_failed",
+    )
+
+    # Optionally also mark any draft as revoked/inactive (so it can't be published)
+    await update_data(
+        supabase,
+        POLICY_TABLE,
+        filters={
+            "account_id": auth.account_id,
+            "app_name": app_name,
+            "is_draft": True,
+        },
+        update_values={
+            "is_revoked": True,
+        },
+        error_message="policy_revoke_failed_draft",
     )
     
     # Audit log policy revocation with user attribution
