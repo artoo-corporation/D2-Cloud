@@ -777,6 +777,14 @@ async def list_policy_versions(
     # Add published_by to each row
     for row in rows:
         row["published_by"] = user_attribution.get(row["version"])
+        if "bundle" not in row:
+            row["bundle"] = None
+        elif isinstance(row["bundle"], str):
+            # Parse JSON string from database into dict for Pydantic
+            try:
+                row["bundle"] = json.loads(row["bundle"])
+            except json.JSONDecodeError:
+                row["bundle"] = None
     
     return [PolicyVersionResponse(**row) for row in rows]
 
