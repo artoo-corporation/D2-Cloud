@@ -725,11 +725,12 @@ async def list_policy_versions(
     if app_name:
         app_name = normalize_app_name(app_name)
     
-    match_filters = {"account_id": auth.account_id, "is_draft": False}
+    # Include both draft and published policies
+    match_filters = {"account_id": auth.account_id}
     if app_name:
         match_filters["app_name"] = app_name
 
-    select_fields = "id,version,active,published_at,expires,revocation_time,app_name"
+    select_fields = "id,version,active,is_draft,published_at,expires,revocation_time,app_name"
     if include_bundle:
         select_fields += ",bundle"
 
