@@ -691,7 +691,7 @@ async def revoke_policy(
         error_message="policy_revoke_failed_draft",
     )
     
-    # Audit log policy revocation with user attribution
+    # Audit log policy revocation (bulk) with user attribution
     await log_audit_event(
         supabase,
         action=AuditAction.policy_revoke,
@@ -699,11 +699,15 @@ async def revoke_policy(
         status=AuditStatus.success,
         token_id=auth.token_id,
         user_id=auth.user_id,
-        metadata={"app_name": app_name, "version": active_policy.get("version")},
+        metadata={"app_name": app_name},
     )
-    
-    logger.info(f"Revoked active policy (version {active_policy['version']}) for app '{app_name}' in account {auth.account_id}")
-    return MessageResponse(message=f"Active policy revoked for app '{app_name}'")
+
+    logger.info(
+        "Revoked all published/draft policies for app '%s' in account %s",
+        app_name,
+        auth.account_id,
+    )
+    return MessageResponse(message=f"All policies revoked for app '{app_name}'")
 
 
 @router.get("/versions", response_model=list[PolicyVersionResponse])
