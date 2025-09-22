@@ -668,7 +668,9 @@ async def revoke_policy(
         supabase,
         POLICY_TABLE,
         keys={"id": active_policy["id"]},
-        values={"revocation_time": datetime.now(timezone.utc)},
+        values={"revocation_time": datetime.now(timezone.utc),
+               "is_revoked": True,
+               "active": False},
     )
     
     # Audit log policy revocation with user attribution
