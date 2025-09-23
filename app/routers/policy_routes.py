@@ -49,7 +49,7 @@ POLICY_TABLE = "policies"
 async def get_policy_bundle(
     response: Response,
     app_name: str = Query("default", description="App name to retrieve policy for"),
-    stage: str = Query("auto", description="Which bundle stage to fetch: published, draft, or auto"),
+    stage: str = Query("auto", description="Which bundle stage to fetch: published, draft, revoked, or auto"),
     auth: AuthContext = Depends(require_auth("policy.read")),
     if_none_match: str | None = Header(None, alias="If-None-Match"),
     supabase=Depends(get_supabase_async),
@@ -91,6 +91,13 @@ async def get_policy_bundle(
             match={"account_id": auth.account_id, "app_name": app_name, "is_draft": True},
             order_by=("version", "desc"),
         )
+    elif stage == "revoked":
+        row = await query_one(
+            supabase,
+            POLICY_TABLE,
+            match={"account_id": auth.account_id, "app_name": app_name, "is_revoked": True},
+            order_by=("version", "desc"),
+        )
     else:  # auto – prefer published then draft
         row = await query_one(
             supabase,
@@ -111,11 +118,13 @@ async def get_policy_bundle(
             raise HTTPException(status_code=404, detail=f"No published policy found for app '{app_name}'")
         elif stage == "draft":
             raise HTTPException(status_code=404, detail=f"No draft policy found for app '{app_name}'")
+        elif stage == "revoked":
+            raise HTTPException(status_code=404, detail=f"No revoked policy found for app '{app_name}'")
         else:  # auto
             raise HTTPException(status_code=404, detail=f"No policy found for app '{app_name}' (checked both published and draft)")
 
-    # 4️⃣  Revocation enforcement
-    if row.get("revocation_time") and datetime.fromisoformat(row["revocation_time"]).astimezone(timezone.utc) < datetime.now(timezone.utc):
+    # 4️⃣  Revocation enforcement (skip for revoked stage)
+    if stage != "revoked" and row.get("revocation_time") and datetime.fromisoformat(row["revocation_time"]).astimezone(timezone.utc) < datetime.now(timezone.utc):
         raise HTTPException(status_code=410, detail=f"Policy for app '{app_name}' has been revoked")
 
     # 5️⃣  Policy expiry enforcement and warnings
