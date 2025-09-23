@@ -170,7 +170,7 @@ class PolicyVersionResponse(BaseModel):
     version: int = Field(..., description="Policy version number")
     active: bool = Field(..., description="Whether this version is currently active")
     is_draft: bool = Field(..., description="Whether this version is a draft")
-    published_at: datetime = Field(..., description="When this version was published")
+    published_at: Optional[datetime] = Field(None, description="When this version was published")
     expires: Optional[datetime] = Field(None, description="When this policy expires")
     revocation_time: Optional[datetime] = Field(None, description="When this version was revoked")
     app_name: str = Field(..., description="App name for this policy")
