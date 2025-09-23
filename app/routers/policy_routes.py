@@ -676,7 +676,7 @@ async def revoke_policy(
         error_message="policy_revoke_failed",
     )
 
-    # Optionally also mark any draft as revoked/inactive (so it can't be published)
+    # Also mark any draft as revoked/inactive (so it can't be published)
     await update_data(
         supabase,
         POLICY_TABLE,
@@ -687,6 +687,7 @@ async def revoke_policy(
         },
         update_values={
             "is_revoked": True,
+            "is_draft": False,
         },
         error_message="policy_revoke_failed_draft",
     )
