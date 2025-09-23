@@ -687,7 +687,7 @@ async def revoke_policy(
         },
         update_values={
             "is_revoked": True,
-            "is_draft": False,
+            "active": False,
         },
         error_message="policy_revoke_failed_draft",
     )
