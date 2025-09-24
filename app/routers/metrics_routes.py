@@ -27,10 +27,15 @@ from app.utils.database import query_one, query_many
 router = APIRouter(prefix="/v1/metrics", tags=["metrics"])
 
 
-async def _ensure_metrics_enabled(supabase, account_id: str) -> dict:
+async def _ensure_metrics_enabled(supabase, account_id: str, auth_context: AuthContext) -> dict:
     account = await query_one(supabase, "accounts", match={"id": account_id})
     if not account:
         raise HTTPException(status_code=404, detail="account_not_found")
+    
+    # Admin users can always access metrics (bypass metrics_enabled check)
+    if "admin" in auth_context.scopes:
+        return account
+        
     if not account.get("metrics_enabled", False):
         raise HTTPException(status_code=403, detail="metrics_disabled")
     return account
@@ -108,7 +113,7 @@ async def get_summary(
     start, end = _parse_timerange(start, end, default_days=30)
 
     # Gate by account setting
-    await _ensure_metrics_enabled(supabase, auth.account_id)
+    await _ensure_metrics_enabled(supabase, auth.account_id, auth)
 
     # Pull relevant events within range
     rows = await query_many(
@@ -176,7 +181,7 @@ async def get_timeseries(
     """Allowed vs denied over a recent window (default past week)."""
     end = datetime.now(timezone.utc)
     start = end - timedelta(days=days)
-    await _ensure_metrics_enabled(supabase, auth.account_id)
+    await _ensure_metrics_enabled(supabase, auth.account_id, auth)
 
     rows = await query_many(
         supabase,
@@ -239,7 +244,7 @@ async def get_top(
     """Top N by tools/resources/event_type for the period."""
     end = datetime.now(timezone.utc)
     start = end - timedelta(days=days)
-    await _ensure_metrics_enabled(supabase, auth.account_id)
+    await _ensure_metrics_enabled(supabase, auth.account_id, auth)
 
     select_fields = "event_type,payload,occurred_at"
     rows = await query_many(
