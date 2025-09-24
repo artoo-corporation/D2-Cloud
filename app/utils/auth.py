@@ -88,7 +88,15 @@ async def _authenticate_token(
         elif isinstance(result, tuple):
             account_id, scopes = result
         else:
-            account_id, scopes = result, ["admin"] if not requirement.strict else []
+            account_id = result
+            if requirement.strict:
+                # For strict mode, admin tokens get explicit scopes
+                scopes = [
+                    "policy.read", "policy.publish", "policy.revoke", "policy.revert",
+                    "key.upload", "event.ingest", "metrics.read"
+                ]
+            else:
+                scopes = ["admin"]  # Wildcard
     else:
         # Supabase JWT - get account_id and claims in one call
         account_id, claims = await verify_supabase_jwt(token, admin_only=requirement.admin_only, return_claims=True)
@@ -123,6 +131,11 @@ async def _authenticate_token(
 
     # Expand shorthand scopes
     effective_scopes = set(scopes)
+    if "admin" in effective_scopes:
+        effective_scopes |= {
+            "policy.read", "policy.publish", "policy.revoke", "policy.revert",
+            "key.upload", "event.ingest", "metrics.read"
+        }
     if "dev" in effective_scopes:
         effective_scopes |= {"policy.read", "policy.publish", "key.upload", "event.ingest"}
     if "server" in effective_scopes:
