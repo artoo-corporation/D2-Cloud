@@ -118,7 +118,7 @@ def create_app() -> FastAPI:  # noqa: C901
         allow_origins=ALLOWED_ORIGINS,
         allow_credentials=True,
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-        allow_headers=["Authorization", "Content-Type", "X-Org-ID"],
+        allow_headers=["Authorization", "Content-Type", "X-Org-ID", "If-Match", "If-None-Match"],
         max_age=600,
     )
 
