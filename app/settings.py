@@ -21,19 +21,20 @@ def _collect_origins() -> list[str]:
     env vars are set.
     """
     origins: list[str] = []
-    for name in ("FRONTEND_ORIGIN", "DOCS_ORIGIN", "EXTRA_ORIGIN"):
-        if (val := os.getenv(name)):
-            origins.append(val)
+    if os.getenv("APP_ENV") == "development":
+        for name in ("FRONTEND_ORIGIN", "DOCS_ORIGIN", "EXTRA_ORIGIN"):
+            if (val := os.getenv(name)):
+                origins.append(val)
 
     # Local-dev fallback (vite / react-dev-server default)
     if not origins:
-        origins.extend(
-            ["https://artoo.love", 
+        origins.extend([
+            "https://artoo.love", 
             "https://d2-dashboard.artoo.love",
             "http://localhost:3000",
-            "http://localhost:3000/"
-            ]
-        )
+            "http://localhost:3000/",
+            "http://localhost:8000"
+        ])
     return origins
 
 
