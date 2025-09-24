@@ -333,6 +333,173 @@ const createToken = async (data) => {
 
 ## 📜 Policy Management
 
+### 🏷️ ETags and Concurrency Control
+
+D2 Cloud uses HTTP ETags for efficient caching and optimistic concurrency control across all policy operations. ETags prevent conflicts when multiple clients modify policies and reduce bandwidth through intelligent caching.
+
+#### **ETag Calculation**
+
+ETags are SHA256 hashes calculated differently based on policy state:
+
+**Published Policies (with JWS signature)**:
+```python
+etag = sha256(jws_content.encode()).hexdigest()
+```
+
+**Draft Policies (without JWS)**:
+```python
+bundle_json = json.dumps(bundle, separators=(",", ":"), sort_keys=True)
+etag = sha256(bundle_json.encode()).hexdigest()
+```
+
+**Key Characteristics**:
+- **Content-based**: Any change to policy content produces a completely different ETag
+- **Deterministic**: Same content always produces the same ETag
+- **Format**: 64-character hexadecimal string (SHA256)
+- **Response format**: Always quoted as strong ETag: `ETag: "abc123..."`
+
+#### **Caching with If-None-Match**
+
+Use `If-None-Match` header for efficient caching on GET requests:
+
+```bash
+# Client includes last known ETag
+curl -H "If-None-Match: \"3c2a7d4f5e6a7b8c\"" \
+     -H "Authorization: Bearer $TOKEN" \
+     "/v1/policy/bundle?app_name=my-app"
+```
+
+**Server Behavior**:
+- **ETag matches**: Returns `304 Not Modified` with minimal payload
+- **ETag differs**: Returns `200 OK` with full policy and new ETag
+- **Draft policies**: If-None-Match is ignored (drafts change frequently)
+
+**304 Response** (ETag unchanged):
+```json
+{
+  "jws": null,
+  "version": 5,
+  "etag": "3c2a7d4f5e6a7b8c",
+  "bundle": null
+}
+```
+
+#### **Concurrency Control with If-Match**
+
+Use `If-Match` header to prevent conflicts during policy publishing:
+
+```bash
+# Client must provide current ETag to publish
+curl -X POST "/v1/policy/publish?app_name=my-app" \
+     -H "Authorization: Bearer $TOKEN" \
+     -H "If-Match: \"3c2a7d4f5e6a7b8c\"" \
+     -d '{}'
+```
+
+**Concurrency Rules**:
+
+| Scenario | If-Match Value | Behavior |
+|----------|---------------|----------|
+| **First publish** | `*`, `"*"`, `W/*`, or omitted | ✅ Allowed |
+| **Update existing** | Current ETag | ✅ Allowed if ETag matches |
+| **Update existing** | Wrong/old ETag | ❌ `409 etag_mismatch` |
+| **Update existing** | Omitted | ❌ `409 etag_mismatch` |
+
+**Error Response** (409 Conflict):
+```json
+{
+  "detail": "etag_mismatch",
+  "message": "Policy was modified by another client. Fetch latest version and retry."
+}
+```
+
+#### **ETag Format Handling**
+
+The server normalizes various ETag formats:
+
+```python
+# All these formats are equivalent:
+"If-Match: \"abc123\""      # Quoted strong ETag
+"If-Match: W/\"abc123\""    # Quoted weak ETag  
+"If-Match: abc123"          # Unquoted
+```
+
+**Server normalization**:
+```python
+normalized_etag = provided_etag.lstrip("W/").strip('"')
+```
+
+#### **Complete Workflow Example**
+
+```typescript
+// 1. Fetch policy with caching
+const fetchPolicy = async (lastETag?: string) => {
+  const headers = {
+    'Authorization': `Bearer ${token}`,
+    ...(lastETag && { 'If-None-Match': lastETag })
+  };
+  
+  const response = await fetch('/v1/policy/bundle?app_name=my-app', { headers });
+  
+  if (response.status === 304) {
+    return { policy: cachedPolicy, etag: lastETag, unchanged: true };
+  }
+  
+  const policy = await response.json();
+  const etag = response.headers.get('ETag')?.replace(/"/g, '');
+  return { policy, etag, unchanged: false };
+};
+
+// 2. Publish with concurrency control
+const publishPolicy = async (currentETag: string) => {
+  const response = await fetch('/v1/policy/publish?app_name=my-app', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'If-Match': `"${currentETag}"`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({})
+  });
+  
+  if (response.status === 409) {
+    const error = await response.json();
+    if (error.detail === 'etag_mismatch') {
+      throw new ConflictError('Policy was modified by another user. Please refresh and try again.');
+    }
+  }
+  
+  const result = await response.json();
+  const newETag = response.headers.get('ETag')?.replace(/"/g, '');
+  return { ...result, etag: newETag };
+};
+
+// 3. Handle conflicts gracefully
+const safePublish = async () => {
+  try {
+    const { policy, etag } = await fetchPolicy();
+    await publishPolicy(etag);
+  } catch (error) {
+    if (error instanceof ConflictError) {
+      // Refresh and retry logic
+      const { policy, etag } = await fetchPolicy(); // Get latest
+      await publishPolicy(etag); // Retry with new ETag
+    }
+  }
+};
+```
+
+#### **Best Practices**
+
+1. **Always use If-Match for publishing**: Prevents accidental overwrites
+2. **Cache with If-None-Match**: Reduces bandwidth for frequent polling
+3. **Handle 409 conflicts gracefully**: Refresh data and retry with new ETag
+4. **Store ETags with cached data**: Enable efficient validation
+5. **First publish uses `*`**: Use `If-Match: *` for new app policies
+6. **Monitor ETag changes**: Different ETag = content changed
+
+---
+
 ### GET /v1/policy/bundle
 
 **Purpose**: Get policy bundle for SDK consumption (with polling rate limits)

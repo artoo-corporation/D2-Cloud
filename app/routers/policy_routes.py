@@ -383,12 +383,29 @@ async def publish_policy(
     )
 
     logger.info(f"Latest published policy: {latest_published}")
+    logger.info(f"If-Match header received: '{if_match}'")
 
     if latest_published:
-        current_etag = sha256(latest_published["jws"].encode()).hexdigest()
+        # Calculate ETag the same way as bundle endpoint
+        jws_content = latest_published.get("jws")
+        if jws_content:
+            # Use JWS for ETag calculation (normal case)
+            current_etag = sha256(jws_content.encode()).hexdigest()
+        else:
+            # Fallback: use bundle content if JWS is missing (shouldn't happen for published policies)
+            logger.warning(f"Published policy has no JWS for account {auth.account_id}, app {app_name}. Using bundle for ETag.")
+            bundle_content = latest_published.get("bundle")
+            if bundle_content:
+                bundle_json = json.dumps(bundle_content, separators=(",", ":"), sort_keys=True)
+                current_etag = sha256(bundle_json.encode()).hexdigest()
+            else:
+                logger.error(f"Published policy has no JWS or bundle for account {auth.account_id}, app {app_name}")
+                raise HTTPException(status_code=500, detail="Published policy missing both JWS and bundle")
 
         provided_etag = if_match.lstrip("W/").strip('"') if if_match else None
 
+        logger.info(f"ETag comparison for account {auth.account_id}: provided='{provided_etag}', current='{current_etag}'")
+        
         if provided_etag is None or provided_etag != current_etag:
             logger.error(f"ETag mismatch for account {auth.account_id}: provided={provided_etag}, current={current_etag}")
             raise HTTPException(status_code=409, detail="etag_mismatch")
