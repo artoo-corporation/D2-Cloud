@@ -66,11 +66,11 @@ def _is_allowed_event(row: dict) -> bool:
     payload = row.get("payload") or {}
     # Primary: tool_invoked with decision allowed/denied
     if e == "tool_invoked":
-        decision = (payload.get("decision") or payload.get("allowed"))
+        decision = (payload.get("decision") or payload.get("allowed") or payload.get("result"))
         return bool(decision is True or decision == "allowed")
     # Fallback: authz_decision events
     if e == "authz_decision":
-        decision = (payload.get("decision") or payload.get("allowed"))
+        decision = (payload.get("decision") or payload.get("allowed") or payload.get("result"))
         return bool(decision is True or decision == "allowed")
     return False
 
@@ -79,10 +79,10 @@ def _is_denied_event(row: dict) -> bool:
     e = (row.get("event_type") or "").lower()
     payload = row.get("payload") or {}
     if e == "tool_invoked":
-        decision = (payload.get("decision") or payload.get("allowed"))
+        decision = (payload.get("decision") or payload.get("allowed") or payload.get("result"))
         return bool(decision is False or decision == "denied")
     if e == "authz_decision":
-        decision = (payload.get("decision") or payload.get("allowed"))
+        decision = (payload.get("decision") or payload.get("allowed") or payload.get("result"))
         return bool(decision is False or decision == "denied")
     return False
 
