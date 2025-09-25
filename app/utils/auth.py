@@ -144,9 +144,9 @@ async def _authenticate_token(
         # Map role to scopes
         if role in {"admin", "owner", "authenticated"}:
             if requirement.strict:
-                # Explicit scopes for strict mode
+                # Explicit scopes for strict mode (include admin for admin_only endpoints)
                 scopes = [
-                    "policy.read", "policy.publish", "policy.revoke", "policy.revert",
+                    "admin", "policy.read", "policy.publish", "policy.revoke", "policy.revert",
                     "key.upload", "event.ingest", "metrics.read"
                 ]
             else:
