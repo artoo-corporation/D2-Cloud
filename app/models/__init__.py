@@ -87,23 +87,8 @@ class AuditAction(str, Enum):
     key_upload = "key.upload"
     key_revoke = "key.revoke"
     
-    # SDK telemetry operations
-    tool_invocation = "tool.invocation"
-    auth_decision = "auth.decision"
-    policy_poll = "policy.poll"
-    policy_load = "policy.load"
-    jwks_fetch = "jwks.fetch"
-    context_leak = "context.leak"
-    missing_policy = "missing.policy"
-    sync_in_async_denied = "sync_in_async.denied"
-    
-    # Threading security operations (NEW 2025-08-28)
-    context_submission = "context.submission"
-    context_missing_actor = "context.missing_actor"
-    context_leak_detected = "context.leak_detected"
-    context_actor_override = "context.actor_override"
-    thread_entrypoint = "thread.entrypoint"
-    context_no_context_error = "context.no_context_error"
+    # NOTE: SDK telemetry events are NOT audit actions.
+    # They stay in the events table only.
 
     # User operations
     user_role_update = "user.role_update"

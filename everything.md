@@ -372,7 +372,7 @@ Every state-changing action and SDK telemetry event is mirrored into `audit_logs
 | `token.create`, `token.revoke`, `token.rotate` | Token management routes |
 | `policy.draft`, `policy.publish`, `policy.update`, `policy.revert`, `policy.revoke` | Policy routes |
 | `key.upload` | Public key routes |
-| `auth.decision`, `tool.invocation`, `policy.poll`, … | SDK `events/ingest` telemetry |
+| ~~`auth.decision`, `tool.invocation`, `policy.poll`, …~~ | ~~SDK telemetry (removed from audit logs)~~ |
 
 Audit records store `actor_id`, `token_id`, optional `user_id`, `status` (success / failure / denied) and `version` where relevant.  The dashboard surfaces these logs with cursor-based pagination via `/v1/audit`.
 
