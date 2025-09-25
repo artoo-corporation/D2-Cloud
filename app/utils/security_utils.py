@@ -96,54 +96,11 @@ async def verify_supabase_jwt(token: str, admin_only: bool = False, return_claim
         # Try to get role from JWT claims for admin checks
         role = unverified_claims.get("role") or unverified_claims.get("user_metadata", {}).get("role")
         
-        # For admin checks, we need to look up the user's role in the database
-        # because JWT only contains the Supabase auth role ("authenticated"), 
-        # not the D2 system role ("admin", "owner", etc.)
-        if admin_only:
-            # Import here to avoid circular imports
-            from app.utils.database import query_one
-            from app.utils.dependencies import get_supabase_async
-            
-            # Get database connection using the global dependency
-            supabase = await get_supabase_async()
-            
-            # Look up user's role in the database using user_id field
-            try:
-                user_row = await query_one(
-                    supabase,
-                    "users", 
-                    match={"user_id": user_id},  # Use user_id field, not id
-                    select_fields="role"
-                )
-                
-                if user_row:
-                    db_role = user_row.get("role")
-                    
-                    # Check if user has admin privileges (owner or admin)
-                    if db_role in {"admin", "owner"}:
-                        # User is admin, add db_role to claims for later use
-                        enhanced_claims = unverified_claims.copy()
-                        enhanced_claims["db_role"] = db_role
-                        
-                        if return_claims:
-                            return str(user_id), enhanced_claims
-                        return str(user_id)
-                    else:
-                        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="admin_required")
-                else:
-                    # User not found in database - treat as non-admin
-                    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="user_not_found")
-                    
-            except HTTPException:
-                raise
-            except Exception as e:
-                # Database lookup failed - be conservative and deny access
-                raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="database_lookup_failed")
-        else:
-            # No admin check required, return user_id
-            if return_claims:
-                return str(user_id), unverified_claims
-            return str(user_id)
+        # For admin checks, we'll defer the database lookup to the auth layer
+        # This function just validates the JWT structure and returns claims
+        if return_claims:
+            return str(user_id), unverified_claims
+        return str(user_id)
     except HTTPException:
         # Re-raise HTTP exceptions (like 503 from _safe_supabase_call) without modification
         raise

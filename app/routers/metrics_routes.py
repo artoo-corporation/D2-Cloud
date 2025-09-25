@@ -33,7 +33,7 @@ async def _ensure_metrics_enabled(supabase, account_id: str, auth_context: AuthC
         raise HTTPException(status_code=404, detail="account_not_found")
     
     # Admin users can always access metrics (bypass metrics_enabled check)
-    if "admin" in auth_context.scopes:
+    if "admin" in auth_context.scopes or "metrics.read" in auth_context.scopes:
         return account
         
     if not account.get("metrics_enabled", False):

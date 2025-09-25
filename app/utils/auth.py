@@ -110,6 +110,37 @@ async def _authenticate_token(
         if db_role:
             role = db_role
         
+        # For admin-only endpoints, look up user's actual role in database
+        # because JWT only contains "authenticated", not the D2 system role
+        if requirement.admin_only and role == "authenticated":
+            from app.utils.database import query_one
+            
+            try:
+                user_row = await query_one(
+                    supabase,
+                    "users", 
+                    match={"user_id": user_id},
+                    select_fields="role"
+                )
+                
+                if user_row and user_row.get("role") in {"admin", "owner"}:
+                    role = user_row.get("role")  # Use database role
+                else:
+                    # User not found or not admin - deny access
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN, 
+                        detail="admin_required"
+                    )
+                    
+            except HTTPException:
+                raise
+            except Exception as e:
+                # Database lookup failed - be conservative and deny access
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE, 
+                    detail="database_lookup_failed"
+                )
+        
         # Map role to scopes
         if role in {"admin", "owner", "authenticated"}:
             if requirement.strict:
