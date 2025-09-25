@@ -135,7 +135,8 @@ async def list_invitations(
     # Build query filters
     filters = {"account_id": auth.account_id}
     if not include_accepted:
-        filters["accepted_at"] = None
+        # Supabase/PostgREST requires the special operator ("is", "null") for NULL comparisons
+        filters["accepted_at"] = ("is", "null")
     
     # Query invitations
     resp = await query_data(
