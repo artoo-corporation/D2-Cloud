@@ -2075,3 +2075,15 @@ process.env.D2_POLICY_URL = 'https://api.d2cloud.com/v1/policy/bundle';
 ---
 
 This document should provide everything needed for comprehensive frontend development against the D2 Cloud API.
+
+## Accounts – members
+
+- **GET /v1/accounts/{account_id}/invitations/members** – Admin-only; lists all users belonging to the account with their `full_name` / `display_name` and role.
+- Response model:
+```json
+{
+  "members": [
+    { "user_id": "…", "email": "…", "full_name": "…", "display_name": "…", "role": "owner", "created_at": "2025-09-15T12:34:56Z" }
+  ]
+}
+```

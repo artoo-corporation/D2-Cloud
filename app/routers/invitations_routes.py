@@ -22,6 +22,9 @@ from app.utils.audit import log_audit_event
 from app.utils.dependencies import get_supabase_async
 from app.utils.auth import require_auth
 from app.utils.database import insert_data, query_data, query_one, update_data
+from pydantic import BaseModel
+from app.models.members import AccountMember, AccountMembersResponse
+
 
 router = APIRouter(prefix="/v1/accounts/{account_id}/invitations", tags=["invitations"])
 
@@ -411,3 +414,39 @@ async def accept_invitation(
     )
     
     return MessageResponse(message="invitation_accepted")
+
+
+@router.get("/members", response_model=AccountMembersResponse)
+async def list_account_members(
+    account_id: str = Path(..., description="Account ID"),
+    auth: AuthContext = Depends(require_auth(admin_only=True, require_user=True)),
+    supabase=Depends(get_supabase_async),
+):
+    """List all users who belong to the given account (admin-only)."""
+
+    # Enforce account access
+    if auth.account_id != account_id:
+        raise HTTPException(status_code=403, detail="account_mismatch")
+
+    resp = await query_data(
+        supabase,
+        "users",
+        filters={"account_id": account_id},
+        select_fields="user_id,email,full_name,display_name,role,created_at",
+    )
+
+    rows = getattr(resp, "data", []) or []
+
+    members = [
+        AccountMember(
+            user_id=row["user_id"],
+            email=row.get("email"),
+            full_name=row.get("full_name"),
+            display_name=row.get("display_name"),
+            role=row.get("role"),
+            created_at=row.get("created_at"),
+        )
+        for row in rows
+    ]
+
+    return AccountMembersResponse(members=members)
