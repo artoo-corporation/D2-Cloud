@@ -52,6 +52,7 @@ class InvitationResponse(BaseModel):
     expires_at: datetime = Field(..., description="When invitation expires")
     accepted_at: Optional[datetime] = Field(None, description="When invitation was accepted")
     created_at: datetime = Field(..., description="When invitation was created")
+    invitation_token: Optional[str] = Field(None, description="Secure invitation token from email link")
 
 
 class InvitationAcceptRequest(BaseModel):

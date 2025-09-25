@@ -146,7 +146,7 @@ async def list_invitations(
         supabase,
         "invitations",
         filters=filters,
-        select_fields="id,email,role,invited_by_user_id,expires_at,accepted_at,created_at"
+        select_fields="id,email,role,invited_by_user_id,expires_at,accepted_at,created_at,invitation_token"
     )
     
     invitations_data = getattr(resp, "data", []) or []
@@ -176,7 +176,8 @@ async def list_invitations(
             invited_by_name=user_names.get(inv["invited_by_user_id"]),
             expires_at=inv["expires_at"],
             accepted_at=inv.get("accepted_at"),
-            created_at=inv["created_at"]
+            created_at=inv["created_at"],
+            invitation_token=inv.get("invitation_token"),
         )
         for inv in invitations_data
     ]
