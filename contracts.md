@@ -1742,7 +1742,8 @@ Send the returned `invitation_url` to the invitee (email, Slack, etc.).
       "invited_by_name": "Alice",
       "expires_at": "2025-10-01T00:00:00Z",
       "accepted_at": null,
-      "created_at": "2025-09-25T00:00:00Z"
+      "created_at": "2025-09-25T00:00:00Z",
+      "invitation_token": "inv_abc123..."  // Only returned to admins for copy-link
     }
   ]
 }
