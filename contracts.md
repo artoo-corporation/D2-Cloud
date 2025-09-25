@@ -1693,7 +1693,7 @@ const detectSuspiciousActivity = (logs) => {
 
 ## 🏢 Multi-Tenancy (Invitations)
 
-### POST /v1/accounts/{account_id}/invitations
+### POST /v1/accounts/{account_id}/invitations  _(create invitation)_
 
 **Purpose**: Invite a user to the organisation
 
@@ -1719,27 +1719,66 @@ const detectSuspiciousActivity = (logs) => {
 ```
 Send the returned `invitation_url` to the invitee (email, Slack, etc.).
 
-### GET /v1/invitations
+### GET /v1/accounts/{account_id}/invitations  _(list invitations)_
 
-**Purpose**: List pending invitations
+**Purpose**: List invitations for the account (pending by default)
 
-**Auth**: Supabase JWT (admin role)
+**Auth**: Supabase JWT – caller must be `admin`/`owner` **and** belong to the account
 
-**Response**:
+**Query Params**:
+| name | type | default | description |
+|------|------|---------|-------------|
+| `include_accepted` | bool | `false` | Include accepted/expired invitations |
+
+**Response** `InvitationListResponse`:
 ```json
-[
-  {
-    "id": "uuid",
-    "email": "newuser@example.com", 
-    "role": "member",
-    "expires_at": "2024-01-08T00:00:00Z",
-    "created_at": "2024-01-01T00:00:00Z",
-    "accepted_at": null
-  }
-]
+{
+  "invitations": [
+    {
+      "id": "uuid",
+      "email": "newuser@example.com",
+      "role": "member",
+      "invited_by_user_id": "user-123",
+      "invited_by_name": "Alice",
+      "expires_at": "2025-10-01T00:00:00Z",
+      "accepted_at": null,
+      "created_at": "2025-09-25T00:00:00Z"
+    }
+  ]
+}
 ```
 
-### DELETE /v1/invitations/{invitation_id}
+### GET /v1/accounts/{account_id}/invitations/members  _(list account users)_
+
+Returns every user already in the organisation with their names & roles.
+
+**Auth**: Supabase JWT – caller must be `admin`/`owner` of the account.
+
+**Response** `AccountMembersResponse`:
+```json
+{
+  "members": [
+    {
+      "user_id": "f6188bb0…",
+      "email": "founder@example.com",
+      "full_name": "David Kim",
+      "display_name": "David",
+      "role": "owner",
+      "created_at": "2025-08-15T02:33:39Z"
+    },
+    {
+      "user_id": "6359c37c…",
+      "email": "dev@example.com",
+      "full_name": "Alpaca",
+      "display_name": "Alpaca",
+      "role": "admin",
+      "created_at": "2025-09-13T19:56:51Z"
+    }
+  ]
+}
+```
+
+### DELETE /v1/accounts/{account_id}/invitations/{invitation_id}
 
 **Purpose**: Cancel invitation
 
