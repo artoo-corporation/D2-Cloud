@@ -117,18 +117,20 @@ async def _authenticate_token(
                     role = db_role
             else:
                 # User not found in users table - this shouldn't happen for valid users
+                # DEBUG: Include user_id in error for debugging
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN, 
-                    detail="user_not_found_in_system"
+                    detail=f"user_not_found_in_system_user_id_{user_id}"
                 )
                 
         except HTTPException:
             raise
         except Exception as e:
             # Database lookup failed - be conservative and deny access
+            # DEBUG: Include the actual error for debugging
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE, 
-                detail="database_lookup_failed"
+                detail=f"database_lookup_failed_{str(e)}"
             )
         
         # Additional privilege check for require_privileged endpoints
@@ -184,6 +186,7 @@ async def _authenticate_token(
         is_privileged=is_privileged,
         user_id=user_id,
         token_id=token_id,
+        app_name=app_name,
     )
 
 
