@@ -63,7 +63,7 @@ async def get_policy_bundle(
             # Server tokens without app_name use "default"
             app_name = "default"
         else:
-            # Dev/admin tokens cannot use automatic app_name resolution
+            # Owner/dev users and privileged tokens cannot use automatic app_name resolution
             # Return 404 as this is likely a server misconfigured with wrong token type
             raise HTTPException(
                 status_code=404, 

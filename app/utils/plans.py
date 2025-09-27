@@ -115,13 +115,13 @@ def enforce_bundle_poll(account_id: str, poll_seconds: int, token_scopes: list[s
     Developer-friendly polling:
     - Dev tokens (scope='dev'): No polling restrictions for local development
     - Server tokens (scope='server'): Full polling restrictions apply
-    - Admin tokens: No polling restrictions (admin privilege)
+    - Privileged tokens (admin scope): No polling restrictions
     """
 
     from fastapi import HTTPException, status  # local import
     import time
 
-    # Skip polling restrictions for dev and admin tokens
+    # Skip polling restrictions for dev and privileged (admin-scope) tokens
     if token_scopes:
         if "dev" in token_scopes or "admin" in token_scopes:
             return  # No restrictions for developers and admins

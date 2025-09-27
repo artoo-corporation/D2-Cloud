@@ -28,13 +28,10 @@ from app.models.scopes import Scope
 
 @dataclass
 class AuthContext:
-    """Authentication context from validated API token.
-    
-    This replaces the old pattern of storing auth data in request.state
-    and makes authentication data explicit and type-safe.
-    """
+    """Authentication context for the current request."""
     account_id: str
     scopes: list[str]
+    is_privileged: bool = False  # True if user is owner or dev
     user_id: str | None = None
     token_id: str | None = None
     app_name: str | None = None
@@ -48,8 +45,8 @@ class AuthContext:
         return any(self.has_scope(scope) for scope in scopes)
     
     def is_admin(self) -> bool:
-        """Check if this is an admin token."""
-        return "admin" in self.scopes
+        """Check if this is an owner/dev token."""
+        return self.is_privileged
     
     def is_dev(self) -> bool:
         """Check if this is a dev token."""
@@ -316,9 +313,7 @@ class EventRecord(BaseModel):
 
 class AuditLogRecord(BaseModel):
     id: int
-    actor_id: str  # Keep for backward compatibility, maps to account_id
-    user_id: str | None = None
-    user_name: str | None = Field(None, description="Display name of user who performed the action")
+    actor_name: str | None = Field(None, description="Display name of user or system actor who performed the action")
     token_id: str | None = None
     action: str
     key_id: str | None = None

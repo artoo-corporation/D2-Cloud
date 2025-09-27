@@ -19,7 +19,7 @@ AUDIT_TABLE = "audit_logs"
 async def list_audit_logs(
     limit: int = Query(100, ge=1, le=1000),
     cursor: str | None = Query(None, description="Cursor '<iso>,<id>' from X-Next-Cursor header"),
-    auth: AuthContext = Depends(require_auth(admin_only=True)),
+    auth: AuthContext = Depends(require_auth(require_privileged=True)),
     supabase=Depends(get_supabase_async),
 ):
     """Paginated audit log list (newest first) with user name attribution."""
@@ -49,7 +49,7 @@ async def list_audit_logs(
     rows = rows_raw if isinstance(rows_raw, list) else getattr(rows_raw, "data", [])
 
     # Get user names for attribution
-    user_ids = [row["user_id"] for row in rows if row.get("user_id")]
+    user_ids = {row["user_id"] for row in rows if row.get("user_id")}
     user_names = {}
     
     if user_ids:
@@ -57,22 +57,41 @@ async def list_audit_logs(
         user_resp = await query_data(
             supabase,
             "users",
-            filters={"user_id": ("in", user_ids)},
+            filters={"user_id": ("in", list(user_ids))},
             select_fields="user_id,display_name,full_name,email"
         )
         user_data = getattr(user_resp, "data", []) or []
         for u in user_data:
-            user_names[u["user_id"]] = u.get("display_name") or u.get("full_name") or u.get("email") or "Unknown User"
+            user_names[u["user_id"]] = u.get("display_name") or u.get("full_name") or u.get("email")
 
     # Add user names to audit records
     enriched_rows = []
     for row in rows:
-        row["user_name"] = user_names.get(row.get("user_id")) if row.get("user_id") else None
-        enriched_rows.append(row)
+        actor_name = "System"  # Default for API token actions
+        user_id = row.get("user_id")
+        if user_id:
+            actor_name = user_names.get(user_id, f"Unknown User ({user_id[:8]}...)")
+        
+        # Create a new dict for the response model to avoid sending raw IDs
+        enriched_rows.append(
+            AuditLogRecord(
+                id=row["id"],
+                actor_name=actor_name,
+                token_id=row.get("token_id"),
+                action=row["action"],
+                key_id=row.get("key_id"),
+                version=row.get("version"),
+                status=row.get("status"),
+                resource_type=row.get("resource_type"),
+                resource_id=row.get("resource_id"),
+                metadata=row.get("metadata"),
+                created_at=row["created_at"],
+            )
+        )
 
     next_cursor = f"{rows[-1]['created_at']},{rows[-1]['id']}" if rows else None
 
     return JSONResponse(
-        content=[AuditLogRecord(**r).model_dump(mode="json") for r in enriched_rows],
+        content=[r.model_dump(mode="json") for r in enriched_rows],
         headers={"X-Next-Cursor": next_cursor or ""},
     )

@@ -11,15 +11,15 @@ from pydantic import BaseModel, Field, validator
 
 class InvitationRole(str, Enum):
     """Roles that can be assigned to invited users."""
-    owner = "owner"      # Full admin access (cannot be invited, only original creator)
-    dev = "dev"          # Developer role (admin-capable)
+    owner = "owner"      # Full access (cannot be invited, only original creator)
+    dev = "dev"          # Developer role (full access)
     member = "member"    # General member (currently not assignable via invitation)
 
 
 class InvitationCreateRequest(BaseModel):
     """Request model for creating a new invitation.
 
-    Only *admin* or *dev* roles are permitted via invitation.  Other roles
+    Only *dev* roles are permitted via invitation.  Other roles
     (e.g. *owner*, *member*) must be set by internal workflows and are therefore
     rejected by validation.
     """

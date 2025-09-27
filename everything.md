@@ -150,7 +150,7 @@ async def handler(auth: AuthContext = Depends(require_scope("policy.read"))):
 # Helper methods
 auth.has_scope("admin")  # Check specific scope
 auth.is_dev()           # Check if dev token
-auth.is_admin()         # Check if admin token
+auth.is_admin()         # Check if privileged (owner/dev) user
 ```
 
 ### app/utils/logger.py
@@ -178,7 +178,7 @@ All paths below are fully-qualified with the base URL `https://d2.artoo.love`.
 | ------ | ---- | ---- | ----------- |
 | GET | `/v1/accounts/me` | Bearer token | Returns plan info, quotas, and account metadata. |
 | POST | `/v1/accounts/{account_id}/tokens` | Supabase JWT | Creates **long-lived opaque API key** with app assignment and user assignment. |
-| POST | `/v1/accounts/{account_id}/tokens/server` | Admin token | **NEW**: Creates server tokens (not user-assigned) with fixed `server` scope for production systems. |
+| POST | `/v1/accounts/{account_id}/tokens/server` | Privileged token (admin scope) | **NEW**: Creates server tokens (not user-assigned) with fixed `server` scope for production systems. |
 | GET | `/v1/accounts/{account_id}/tokens` | Supabase JWT | Lists tokens with creator/assignee names. |
 | DELETE | `/v1/accounts/{account_id}/tokens/{token_id}` | Supabase JWT | Revokes token. |
 | POST | `/v1/accounts/{account_id}/tokens/{token_id}/rotate` | Supabase JWT | **NEW**: Generates new token value, revokes old one. |
@@ -238,9 +238,9 @@ All paths below are fully-qualified with the base URL `https://d2.artoo.love`.
 | Method | Path | Auth | Description |
 | ------ | ---- | ---- | ----------- |
 | GET | `/.well-known/jwks.json` | None | **Public discovery** endpoint (rate-limited 60/min). Enhanced with debugging headers and 60s cache control. |
-| GET | `/v1/jwks/configuration` | Admin token | **NEW**: Get current JWKS configuration for dashboard display. |
-| GET | `/v1/jwks/history` | Admin token | **NEW**: Get complete JWKS rotation history and key lifecycle. |
-| POST | `/v1/jwks/rotate` | Admin token | **Automated rotation** with zero-disruption policy re-signing and smart cleanup. |
+| GET | `/v1/jwks/configuration` | Privileged token (admin scope) | **NEW**: Get current JWKS configuration for dashboard display. |
+| GET | `/v1/jwks/history` | Privileged token (admin scope) | **NEW**: Get complete JWKS rotation history and key lifecycle. |
+| POST | `/v1/jwks/rotate` | Privileged token (admin scope) | **Automated rotation** with zero-disruption policy re-signing and smart cleanup. |
 
 **Key Features (2025-09-04):**
 - **Fully Automated Rotation**: Single API call triggers complete key lifecycle management
@@ -341,7 +341,7 @@ All paths below are fully-qualified with the base URL `https://d2.artoo.love`.
 * **Developer token** – scopes `dev` → shorthand for `policy.read`, `policy.publish`, `key.upload`, `event.ingest`.
 * **Server token** – scopes `server` → shorthand for `policy.read`, `event.ingest` (read-only).
 
-Production servers **must use** `server` tokens; developer laptops/CI **should use** `dev` tokens.  Admin tokens (`admin` scope) retain full CRUD capability and are typically created via the dashboard by an account owner.
+Production servers **must use** `server` tokens; developer laptops/CI **should use** `dev` tokens.  Privileged tokens (`admin` scope) retain full CRUD capability and are typically created via the dashboard by an account owner.
 
 Supported individual scopes:
 
@@ -356,12 +356,12 @@ Supported individual scopes:
 * Composite shorthands: 
   - `dev` → `policy.read` + `policy.publish` + `key.upload`
   - `server` → `policy.read` + `event.ingest` (read-only)
-  - `admin` → wildcard access to all scopes
+  - `admin` (API token scope) → wildcard access to all scopes
 
 **Key Changes (2025-08-28):**
 - Granular scopes for advanced policy operations (revoke, revert)
 - Separate `metrics.read` scope for dashboard access
-- Developer-friendly polling: `dev` and `admin` tokens bypass rate limits
+- Developer-friendly polling: `dev` and privileged (admin-scope) tokens bypass rate limits
 
 ### 5.7 Audit & Telemetry
 
@@ -411,7 +411,7 @@ The code interacts with these tables (names are hard-coded):
 ## 8. Security Measures
 
 1. **Bearer tokens** – bcrypt-salted SHA-256 digests; verification traverses all rows to support legacy clear hashes.
-2. **Admin scope** – actions that mutate state (token creation, key rotation, policy publication) require `admin` scope.
+2. **Privileged (admin) scope** – actions that mutate state (token creation, key rotation, policy publication) require `admin` scope.
 3. **Rate-limiting** – IP-based (`SlowAPI`) global limit plus router-specific JWKS limit.
 4. **AES-GCM encryption** – private RSA keys are encrypted server-side at rest using tenant-wide `JWK_AES_KEY`.
 5. **Plan enforcement** – batch size, ingest interval, poll interval, and tool-count checked on each request.

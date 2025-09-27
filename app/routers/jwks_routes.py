@@ -83,7 +83,7 @@ async def get_jwks(
 @admin_router.get("/configuration", response_model=JWKSConfigurationResponse)
 async def get_jwks_configuration(
     request: Request,
-    auth: AuthContext = Depends(require_auth(admin_only=True)),
+    auth: AuthContext = Depends(require_auth(require_privileged=True)),
     supabase=Depends(get_supabase_async),
 ):
     """Get current JWKS configuration for the authenticated account."""
@@ -120,7 +120,7 @@ async def get_jwks_configuration(
 
 @admin_router.get("/history", response_model=JWKSHistoryResponse)
 async def get_jwks_history(
-    auth: AuthContext = Depends(require_auth(admin_only=True)),
+    auth: AuthContext = Depends(require_auth(require_privileged=True)),
     supabase=Depends(get_supabase_async),
 ):
     """Get complete JWKS rotation history for the authenticated account."""
@@ -261,7 +261,7 @@ async def log_rotation_failure(account_id: str, rotation_id: str, error: str, su
 @admin_router.post("/rotate", response_model=JWKSRotationResponse, status_code=status.HTTP_201_CREATED)
 async def rotate_jwk(
     background_tasks: BackgroundTasks,
-    auth: AuthContext = Depends(require_auth(admin_only=True)),
+    auth: AuthContext = Depends(require_auth(require_privileged=True)),
     supabase=Depends(get_supabase_async),
 ):
     """Fully automated JWKS rotation with zero disruption."""

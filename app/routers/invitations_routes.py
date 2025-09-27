@@ -42,7 +42,7 @@ async def _generate_invitation_token() -> str:
 async def create_invitation(
     account_id: str = Path(..., description="Account ID"),
     request: InvitationCreateRequest = ...,
-    auth: AuthContext = Depends(require_auth(admin_only=True, require_user=True)),
+    auth: AuthContext = Depends(require_auth(require_privileged=True, require_user=True)),
     supabase=Depends(get_supabase_async),
 ):
     """Create a new invitation to join the account.
@@ -127,7 +127,7 @@ async def create_invitation(
 async def list_invitations(
     account_id: str = Path(..., description="Account ID"),
     include_accepted: bool = Query(False, description="Include accepted invitations"),
-    auth: AuthContext = Depends(require_auth(admin_only=True, require_user=True)),
+    auth: AuthContext = Depends(require_auth(require_privileged=True, require_user=True)),
     supabase=Depends(get_supabase_async),
 ):
     """List all invitations for the account with user name attribution."""
@@ -189,7 +189,7 @@ async def list_invitations(
 async def cancel_invitation(
     account_id: str = Path(..., description="Account ID"),
     invitation_id: str = Path(..., description="Invitation ID to cancel"),
-    auth: AuthContext = Depends(require_auth(admin_only=True, require_user=True)),
+    auth: AuthContext = Depends(require_auth(require_privileged=True, require_user=True)),
     supabase=Depends(get_supabase_async),
 ):
     """Cancel a pending invitation."""
@@ -420,7 +420,7 @@ async def accept_invitation(
 @router.get("/members", response_model=AccountMembersResponse)
 async def list_account_members(
     account_id: str = Path(..., description="Account ID"),
-    auth: AuthContext = Depends(require_auth(admin_only=True, require_user=True)),
+    auth: AuthContext = Depends(require_auth(require_privileged=True, require_user=True)),
     supabase=Depends(get_supabase_async),
 ):
     """List all users who belong to the given account (admin-only)."""

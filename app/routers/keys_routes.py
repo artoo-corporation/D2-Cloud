@@ -119,7 +119,7 @@ async def revoke_key(
 @router.get("", response_model=list[PublicKeyResponse])
 async def list_keys(
     include_revoked: int = Query(0, ge=0, le=1),
-    auth: AuthContext = Depends(require_auth(admin_only=True, require_user=True)),  # OAuth users (frontend) can list keys
+    auth: AuthContext = Depends(require_auth(require_privileged=True, require_user=True)),  # OAuth users (frontend) can list keys
     supabase=Depends(get_supabase_async),
 ):
     # Get public keys for the account

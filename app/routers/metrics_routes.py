@@ -32,8 +32,8 @@ async def _ensure_metrics_enabled(supabase, account_id: str, auth_context: AuthC
     if not account:
         raise HTTPException(status_code=404, detail="account_not_found")
     
-    # Admin users can always access metrics (bypass metrics_enabled check)
-    if "admin" in auth_context.scopes or "metrics.read" in auth_context.scopes:
+    # Owner/dev users can always access metrics (bypass metrics_enabled check)
+    if auth_context.is_privileged or "metrics.read" in auth_context.scopes:
         return account
         
     if not account.get("metrics_enabled", False):
@@ -106,7 +106,7 @@ def _extract_decision_ms(row: dict) -> float | None:
 async def get_summary(
     start: datetime | None = Query(None, description="UTC start time"),
     end: datetime | None = Query(None, description="UTC end time"),
-    auth: AuthContext = Depends(require_auth("metrics.read", strict=True, admin_only=True)),
+    auth: AuthContext = Depends(require_auth(require_user=True)),
     supabase=Depends(get_supabase_async),
 ):
     """Overall month-style summary (configurable range)."""
@@ -175,7 +175,7 @@ async def get_summary(
 async def get_timeseries(
     bucket: str = Query("day", pattern="^(hour|day)$"),
     days: int = Query(7, ge=1, le=90),
-    auth: AuthContext = Depends(require_auth("metrics.read", strict=True, admin_only=True)),
+    auth: AuthContext = Depends(require_auth(require_user=True)),
     supabase=Depends(get_supabase_async),
 ):
     """Allowed vs denied over a recent window (default past week)."""
@@ -238,7 +238,7 @@ async def get_top(
     dimension: str = Query("tools", pattern="^(tools|resources|event_type)$"),
     days: int = Query(30, ge=1, le=180),
     n: int = Query(10, ge=1, le=100),
-    auth: AuthContext = Depends(require_auth("metrics.read", strict=True, admin_only=True)),
+    auth: AuthContext = Depends(require_auth(require_user=True)),
     supabase=Depends(get_supabase_async),
 ):
     """Top N by tools/resources/event_type for the period."""

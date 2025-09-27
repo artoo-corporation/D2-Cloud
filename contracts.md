@@ -5,9 +5,9 @@
 - Supported patterns:
   - `require_auth("policy.read")` – explicit scope
   - `require_auth(["policy.read", "metrics.read"])` – multiple scopes (all required)
-  - `require_auth(admin_only=True)` – admin via D2 token or Supabase JWT
+  - `require_auth(require_privileged=True)` – owner/dev via Supabase JWT or privileged API token (admin scope)
   - `require_auth("metrics.read", strict=True)` – no admin wildcard; explicit scopes required
-  - `require_auth(admin_only=True, require_user=True)` – must be a Supabase user session (user_id present)
+  - `require_auth(require_privileged=True, require_user=True)` – must be a Supabase user session (user_id present)
 - Deprecated/removed: `require_scope`, `require_scope_strict`, `require_actor_admin`, `require_account_admin`, `require_token_admin`.
 
 ### Accounts – event sampling
@@ -73,7 +73,7 @@ Policy publishing returns JWS format for all authentication methods:
 
 ### 👥 Enhanced Role Management
 - New `dev` role for policy editing without admin privileges
-- Admin-only endpoint to change user roles (`PATCH /v1/accounts/{account_id}/users/{user_id}/role`)
+  (User roles are fixed: owner (creator) and dev (invited). No role update endpoint.)
 - Invitation system now restricts to `admin` and `dev` roles only
 - `owner` role is immutable and assigned automatically to first user
 
@@ -111,9 +111,7 @@ Authorization: Bearer d2_[token_value]
 
 ### Token Types & Scopes
 
-- **Admin Tokens**: Full access (`admin` scope)
-- **Dev Tokens**: Policy editing (`dev` scope = `policy.read` + `policy.publish` + `key.upload`)  
-- **Server Tokens**: Runtime access (`server` scope = `policy.read` + `event.ingest`)
+Tokens: Only two roles exist – dev (developer) and server (service). The internal admin scope is reserved for system-level compatibility but is not issued via the API.
 
 ### Authentication Errors
 
@@ -196,7 +194,7 @@ if (account.trial_expires) {
 
 **Purpose**: Create new API tokens (dashboard only - requires Supabase session)
 
-**Auth**: Supabase JWT (admin role)
+**Auth**: Supabase JWT (owner/dev)
 
 **Request**:
 ```json
@@ -244,7 +242,7 @@ const createToken = async (data) => {
 
 **Purpose**: List all tokens for account
 
-**Auth**: Supabase JWT (admin role)
+**Auth**: Supabase JWT (owner/dev)
 
 **Response**:
 ```json
@@ -267,7 +265,7 @@ const createToken = async (data) => {
 
 **Purpose**: Revoke a token permanently
 
-**Auth**: Supabase JWT (admin role)
+**Auth**: Supabase JWT (owner/dev)
 
 **Response**: `204 No Content`
 
@@ -275,7 +273,7 @@ const createToken = async (data) => {
 
 **Purpose**: Generate new token value, revoke old one
 
-**Auth**: Supabase JWT (admin role)
+**Auth**: Supabase JWT (owner/dev)
 
 **Response**:
 ```json
@@ -289,7 +287,7 @@ const createToken = async (data) => {
 
 **Purpose**: List available scopes for token creation UI
 
-**Auth**: Supabase JWT (admin role)
+**Auth**: Supabase JWT (owner/dev)
 
 **Response**:
 ```json
@@ -313,7 +311,7 @@ const createToken = async (data) => {
 
 **Purpose**: List users for token assignment dropdown
 
-**Auth**: Supabase JWT (admin role)
+**Auth**: Supabase JWT (owner/dev)
 
 **Response**:
 ```json
@@ -548,7 +546,7 @@ const safePublish = async () => {
 
 **Rate Limiting** (Updated 2025-08-28):
 - **Dev tokens**: No polling limits (developer-friendly for local development)
-- **Admin tokens**: No polling limits (admin privilege)
+- Privileged tokens (admin scope) have no polling limits – not issued by API; for internal/system use only.
 - **Server tokens**: Plan-based limits (30-300s for production)
 
 ### 🔢 App Quota (NEW 2025-09-08)
@@ -1204,7 +1202,7 @@ const uploadKey = async (publicKeyBase64) => {
 
 **Purpose**: List uploaded keys with user attribution (for frontend display)
 
-**Auth**: Supabase JWT (admin or owner role) *(Updated 2025-09-08)*
+**Auth**: Supabase JWT (owner/dev) *(Updated 2025-09-08)*
 
 **Query Parameters**:
 - `include_revoked`: Include revoked keys (0/1)
@@ -1492,7 +1490,7 @@ Notes:
 
 **Purpose**: List comprehensive audit logs with user attribution (admin only)
 
-**Auth**: `admin` scope
+**Auth**: dev or server API token (depending on endpoint)
 
 **Query Parameters**:
 - `limit`: Max 1000 (default: 100)
@@ -1619,7 +1617,7 @@ X-Next-Cursor: "2025-09-15T23:15:56Z,8"
   "metadata": {
     "target_user_id": "user-uuid",
     "old_role": "member",
-    "new_role": "admin"
+    "new_role": "dev"
   }
 }
 ```
@@ -2118,7 +2116,7 @@ This document should provide everything needed for comprehensive frontend develo
 
 ## Accounts – members
 
-- **GET /v1/accounts/{account_id}/invitations/members** – Admin-only; lists all users belonging to the account with their `full_name` / `display_name` and role.
+- **GET /v1/accounts/{account_id}/invitations/members** – Owner/Dev only; lists all users belonging to the account with their `full_name` / `display_name` and role.
 - Response model:
 ```json
 {

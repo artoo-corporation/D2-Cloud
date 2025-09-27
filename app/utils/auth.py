@@ -30,37 +30,35 @@ class AuthRequirement:
         self,
         scopes: list[str] | None = None,
         *,
-        admin_only: bool = False,
+        require_privileged: bool = False,
         strict: bool = False,
         require_user: bool = False,
     ):
         """
         Args:
             scopes: Required scopes (e.g., ["policy.read", "metrics.read"])
-            admin_only: Require admin role (shorthand for admin scope)
-            strict: No admin wildcard - must have explicit scopes
+            require_privileged: Require owner/dev role
+            strict: No wildcard for privileged users - must have explicit scopes
             require_user: Must be a Supabase JWT (has user_id), not just API token
         """
         self.scopes = set(scopes or [])
-        self.admin_only = admin_only
+        self.require_privileged = require_privileged
         self.strict = strict
         self.require_user = require_user
         
-        if admin_only:
-            self.scopes.add("admin")
-
-
+    
 async def _authenticate_token(
     token: str,
     supabase,
     requirement: AuthRequirement,
 ) -> AuthContext:
-    """Core authentication logic - handles both D2 tokens and Supabase JWTs."""
     
-    user_id = None
-    token_id = None
-    app_name = None
-    
+    user_id: str | None = None
+    token_id: str | None = None
+    app_name: str | None = None
+    is_privileged = False
+    role: str | None = None
+
     if token.startswith("d2_"):
         # D2 API Token
         if requirement.require_user:
@@ -72,7 +70,7 @@ async def _authenticate_token(
         result: Any = verify_api_token(
             token,
             supabase,
-            admin_only=requirement.admin_only,
+            admin_only=requirement.require_privileged,
             return_details=True,
         )
 
@@ -89,17 +87,13 @@ async def _authenticate_token(
             account_id, scopes = result
         else:
             account_id = result
-            if requirement.strict:
-                # For strict mode, admin tokens get explicit scopes
-                scopes = [
-                    "policy.read", "policy.publish", "policy.revoke", "policy.revert",
-                    "key.upload", "event.ingest", "metrics.read"
-                ]
-            else:
-                scopes = ["admin"]  # Wildcard
+            # Privilege for API tokens is already enforced by verify_api_token
+            # when admin_only=True is passed.
+            scopes = []
+
     else:
         # Supabase JWT - get account_id and claims in one call
-        account_id, claims = await verify_supabase_jwt(token, admin_only=requirement.admin_only, return_claims=True)
+        account_id, claims = await verify_supabase_jwt(token, admin_only=requirement.require_privileged, return_claims=True)
 
         # Extract user ID and role from the already-parsed JWT claims
         user_id = claims.get("sub")
@@ -110,9 +104,9 @@ async def _authenticate_token(
         if db_role:
             role = db_role
         
-        # For admin-only endpoints, look up user's actual role in database
+        # For owner/dev-only endpoints, look up user's actual role in database
         # because JWT only contains "authenticated", not the D2 system role
-        if requirement.admin_only and role == "authenticated":
+        if requirement.require_privileged and role == "authenticated":
             from app.utils.database import query_one
             
             try:
@@ -123,13 +117,13 @@ async def _authenticate_token(
                     select_fields="role"
                 )
                 
-                if user_row and user_row.get("role") in {"admin", "owner"}:
+                if user_row and user_row.get("role") in {"owner", "dev"}:
                     role = user_row.get("role")  # Use database role
                 else:
-                    # User not found or not admin - deny access
+                    # User not found or not owner/dev - deny access
                     raise HTTPException(
                         status_code=status.HTTP_403_FORBIDDEN, 
-                        detail="admin_required"
+                        detail="owner_or_dev_required"
                     )
                     
             except HTTPException:
@@ -141,40 +135,40 @@ async def _authenticate_token(
                     detail="database_lookup_failed"
                 )
         
-        # Map role to scopes
-        if role in {"owner", "dev", "authenticated"}:
-            if requirement.strict:
-                # Explicit scopes for strict mode (include admin for admin_only endpoints)
-                scopes = [
-                    "admin", "policy.read", "policy.publish", "policy.revoke", "policy.revert",
-                    "key.upload", "event.ingest", "metrics.read"
-                ]
-            else:
-                scopes = ["admin"]  # Wildcard
-        elif role == "dev":
-            scopes = ["dev"]
-        elif role == "member":
-            scopes = ["policy.read"]
+        # Determine privilege from role
+        if role in {"owner", "dev"}:
+            is_privileged = True
+            scopes = []  # Scopes are expanded below based on privilege
         elif role == "authenticated":
             scopes = ["policy.read"]  # Basic read access for authenticated users
         else:
             scopes = []
 
+    # Final privilege check
+    if requirement.require_privileged and not is_privileged:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="owner_or_dev_required",
+        )
+
     # Expand shorthand scopes
     effective_scopes = set(scopes)
-    if "admin" in effective_scopes or role == "dev":
+    if is_privileged:
         effective_scopes |= {
             "policy.read", "policy.publish", "policy.revoke", "policy.revert",
             "key.upload", "event.ingest", "metrics.read"
         }
-    if "dev" in effective_scopes:
+    if "dev" in scopes: # For API tokens with "dev" scope
         effective_scopes |= {"policy.read", "policy.publish", "key.upload", "event.ingest"}
-    if "server" in effective_scopes:
+    if "server" in scopes: # For API tokens with "server" scope
         effective_scopes |= {"policy.read", "event.ingest"}
 
     # Check scope requirements
     if requirement.scopes:
-        if requirement.strict or "admin" not in effective_scopes:
+        # Wildcard for privileged users unless in strict mode
+        if is_privileged and not requirement.strict:
+            pass  # Privileged users bypass scope checks unless strict
+        else:
             if not requirement.scopes.issubset(effective_scopes):
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
@@ -184,16 +178,16 @@ async def _authenticate_token(
     return AuthContext(
         account_id=account_id,
         scopes=list(scopes),
+        is_privileged=is_privileged,
         user_id=user_id,
         token_id=token_id,
-        app_name=app_name,
     )
 
 
 def require_auth(
     scopes: list[str] | str | None = None,
     *,
-    admin_only: bool = False,
+    require_privileged: bool = False,
     strict: bool = False,
     require_user: bool = False,
 ):
@@ -207,14 +201,14 @@ def require_auth(
         # Multiple scopes
         auth: AuthContext = Depends(require_auth(["policy.read", "metrics.read"]))
         
-        # Admin only (any admin mechanism)
-        auth: AuthContext = Depends(require_auth(admin_only=True))
+        # Owner/dev only (any owner/dev mechanism)
+        auth: AuthContext = Depends(require_auth(require_privileged=True))
         
-        # Strict scope (no admin wildcard)
+        # Strict scope (no wildcard for privileged users)
         auth: AuthContext = Depends(require_auth("metrics.read", strict=True))
         
         # Must be Supabase user (for token creation, etc.)
-        auth: AuthContext = Depends(require_auth(admin_only=True, require_user=True))
+        auth: AuthContext = Depends(require_auth(require_privileged=True, require_user=True))
     """
     
     # Normalize scopes to list
@@ -223,7 +217,7 @@ def require_auth(
     
     requirement = AuthRequirement(
         scopes=scopes,
-        admin_only=admin_only,
+        require_privileged=require_privileged,
         strict=strict,
         require_user=require_user,
     )
@@ -236,7 +230,7 @@ def require_auth(
         # Development bypass
         if authorization is None and APP_ENV == "development":
             account_id = _dev_account_id()
-            dev_scopes = ["admin"] if not strict else (scopes or [])
+            dev_scopes = ["admin"] if not strict else (scopes or [])  # Dev bypass
             
             # Store for backward compatibility
             request.state.account_id = account_id
@@ -274,21 +268,21 @@ def require_auth(
 
 
 # Convenience aliases for common patterns
-def require_admin() -> Any:
-    """Require admin role (any auth mechanism)."""
-    return require_auth(admin_only=True)
+def require_privileged_user() -> Any:
+    """Require owner/dev role (any auth mechanism)."""
+    return require_auth(require_privileged=True)
 
 
-def require_user_admin() -> Any:
-    """Require admin role via Supabase JWT (for user attribution)."""
-    return require_auth(admin_only=True, require_user=True)
+def require_privileged_session() -> Any:
+    """Require owner/dev role via Supabase JWT (for user attribution)."""
+    return require_auth(require_privileged=True, require_user=True)
 
 
 def require_scope_any(*scopes: str) -> Any:
-    """Require any of the given scopes (admin wildcard applies)."""
+    """Require any of the given scopes (privileged user wildcard applies)."""
     return require_auth(list(scopes))
 
 
 def require_scope_strict(*scopes: str) -> Any:
-    """Require explicit scopes (no admin wildcard)."""
+    """Require explicit scopes (no privileged user wildcard)."""
     return require_auth(list(scopes), strict=True)

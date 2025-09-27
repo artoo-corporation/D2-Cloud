@@ -341,7 +341,7 @@ async def verify_api_token(
         pass
 
     if admin_only and "admin" not in scopes:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin scope required")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Owner/dev scope required")
 
     if return_scopes:
         return row["account_id"], (row.get("scopes") or [])

@@ -3,10 +3,9 @@ from __future__ import annotations
 """API token management endpoints nested under /v1/accounts/{account_id}.
 
 Creation of tokens is restricted to authenticated dashboard users (Supabase
-session). All other token operations still require an admin token.
+session). All other token operations still require a privileged token (admin scope).
 
-First-token behavior: The very first token for an account is forced to
-["read"]. All subsequent tokens default to ["admin"] unless narrowed.
+Token types: Only two token roles are supported – "dev" and "server".
 """
 
 from uuid import uuid4
@@ -62,7 +61,7 @@ async def _token_count(supabase, account_id: str) -> int:
 async def create_token(
     account_id: str = Path(..., description="Target account ID"),
     payload: TokenCreateRequest | None = None,
-    auth: AuthContext = Depends(require_auth(admin_only=True, require_user=True)),  # Must be Supabase session (user_id present)
+    auth: AuthContext = Depends(require_auth(require_privileged=True, require_user=True)),  # Must be Supabase session (user_id present)
     supabase=Depends(get_supabase_async),
 ):
     """Issue a new API token.
@@ -72,15 +71,9 @@ async def create_token(
     • If this is the first token for the account, scopes are forced to ["read"].
     • Otherwise, scopes default to ["read"] unless explicitly narrowed by payload.
 
-    Allowed scopes:
-    • "read"            – bundle download, event ingest
-    • "policy.publish"  – upload & publish policy bundles (requires signature header)
-    • "key.upload"      – upload developer public keys
-    • "event.ingest"    – send usage events
-    • "metrics.read"    – read-only metrics endpoint (future)
-    • "server"          – read-only role (policy.read + event.ingest)
-    • "dev"             – shorthand for policy.read + policy.publish + key.upload + event.ingest
-    • "admin"           – full wildcard (admin-only; includes all above)
+    Token roles:
+    • "dev"             – developer token (policy.read + policy.publish + key.upload + event.ingest)
+    • "server"          – service token (policy.read + event.ingest)
     """
 
     # Enforce account match (user_id is guaranteed by require_user=True)
@@ -102,26 +95,20 @@ async def create_token(
         # Default to current user
         assigned_user_id = auth.user_id
 
-    existing = await _token_count(supabase, auth.account_id)
-
-    if existing == 0:
-        scopes = ["policy.read"]
+    # Determine token role (only 'dev' or 'server' allowed)
+    scopes: list[str]
+    requested = set()
+    if payload and payload.scopes:
+        requested = {
+            s.value if isinstance(s, Scope) else str(s)
+            for s in payload.scopes
+        }
+    if not requested or "dev" in requested:
+        scopes = ["dev"]
+    elif "server" in requested:
+        scopes = ["server"]
     else:
-        scopes = ["policy.read"]
-        if payload and payload.scopes:
-            requested = {
-                s.value if isinstance(s, Scope) else str(s)
-                for s in payload.scopes
-            }
-            if "admin" in requested:
-                scopes = ["admin"]
-            elif "dev" in requested or requested == {"policy.read", "policy.publish", "key.upload", "event.ingest"}:
-                scopes = ["dev"]
-            elif "server" in requested or requested == {"policy.read", "event.ingest"}:
-                scopes = ["server"]
-            else:
-                _non_admin = {s.value for s in Scope if s.value not in {"admin", "dev", "server"}}
-                scopes = ["admin"] if requested.issuperset(_non_admin) else list(requested or {"read"})
+        raise HTTPException(status_code=400, detail="invalid_token_role")
 
     # Generate token & identifiers
     raw_token = f"{TOKEN_PREFIX}{secrets.token_urlsafe(32)}"
@@ -186,7 +173,7 @@ async def create_token(
 async def create_server_token(
     account_id: str = Path(..., description="Target account ID"),
     payload: ServerTokenRequest | None = None,
-    auth: AuthContext = Depends(require_auth(admin_only=True)),  # Must be account admin (can be token or user)
+    auth: AuthContext = Depends(require_auth(require_privileged=True)),  # Must be account admin (can be token or user)
     supabase=Depends(get_supabase_async),
 ):
     """Issue a new server API token.
@@ -255,14 +242,14 @@ async def create_server_token(
 
 
 # ---------------------------------------------------------------------------
-# List tokens (admin-only)
+# List tokens (owner/dev only)
 # ---------------------------------------------------------------------------
 
 
 @router.get("/tokens", response_model=list[APITokenResponse])
 async def list_tokens(
     account_id: str = Path(...),
-    auth: AuthContext = Depends(require_auth(admin_only=True)),
+    auth: AuthContext = Depends(require_auth(require_privileged=True)),
     supabase=Depends(get_supabase_async),
 ):
     if auth.account_id != account_id:
@@ -311,7 +298,7 @@ async def list_tokens(
 async def revoke_token(
     account_id: str = Path(...),
     token_id: str = Path(..., description="Token ID to revoke"),
-    auth: AuthContext = Depends(require_auth(admin_only=True)),
+    auth: AuthContext = Depends(require_auth(require_privileged=True)),
     supabase=Depends(get_supabase_async),
 ):
     if auth.account_id != account_id:
@@ -353,7 +340,7 @@ async def revoke_token(
 async def rotate_token(
     account_id: str = Path(...),
     token_id: str = Path(..., description="Token ID to rotate"),
-    auth: AuthContext = Depends(require_auth(admin_only=True)),
+    auth: AuthContext = Depends(require_auth(require_privileged=True, require_user=True)),
     supabase=Depends(get_supabase_async),
 ):
     """Rotate a token: create new token with same settings, revoke old one."""
@@ -441,12 +428,8 @@ async def rotate_token(
 async def list_available_scopes():
     """Return available token role scopes with descriptions (for token creation dropdown)."""
     
-    # Role scopes with their descriptions
+    # Token roles with their descriptions
     role_scopes = {
-        Scope.admin: {
-            "label": "Admin",
-            "description": "Full access - all operations"
-        },
         Scope.dev: {
             "label": "Developer", 
             "description": "Policy read/write, key upload, event ingest"
@@ -476,7 +459,7 @@ from typing import Dict
 @router.get("/users")
 async def list_account_users(
     account_id: str = Path(..., description="Account ID"),
-    auth: AuthContext = Depends(require_auth(admin_only=True, require_user=True)),
+    auth: AuthContext = Depends(require_auth(require_privileged=True, require_user=True)),
     supabase=Depends(get_supabase_async),
 ):
     """List all users in the account for token assignment dropdown.

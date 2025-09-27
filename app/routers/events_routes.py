@@ -108,7 +108,7 @@ async def ingest_events(
 async def list_events(
     limit: int = Query(100, ge=1, le=1000),
     cursor: str | None = Query(None, description="Cursor of form '<iso>,<uuid>' from X-Next-Cursor header"),
-    auth: AuthContext = Depends(require_auth("metrics.read")),
+    auth: AuthContext = Depends(require_auth(require_user=True)),
     supabase=Depends(get_supabase_async),
 ):
     # Build query manually to support compound cursor

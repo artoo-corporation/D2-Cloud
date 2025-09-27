@@ -11,7 +11,7 @@ class AccountMember(BaseModel):
     email: Optional[str] = None
     full_name: Optional[str] = None
     display_name: Optional[str] = None
-    role: str  # owner | admin | dev | member
+    role: str  # owner | dev
     created_at: Optional[str] = None  # ISO timestamp string
 
 

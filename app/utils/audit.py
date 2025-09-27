@@ -76,7 +76,7 @@ async def extract_token_details_for_audit(authorization: str, supabase) -> dict:
     Returns dict with token_id, user_id, and account_id for audit context.
     """
     try:
-        from app.utils.security_utils import verify_api_token
+        from app.utils.auth import verify_api_token
         
         if not authorization or not authorization.startswith("Bearer "):
             return {}
