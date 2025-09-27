@@ -12,8 +12,7 @@ from pydantic import BaseModel, Field, validator
 class InvitationRole(str, Enum):
     """Roles that can be assigned to invited users."""
     owner = "owner"      # Full admin access (cannot be invited, only original creator)
-    admin = "admin"      # Can manage users, tokens, policies
-    dev = "dev"          # Developer role with limited admin capabilities
+    dev = "dev"          # Developer role (admin-capable)
     member = "member"    # General member (currently not assignable via invitation)
 
 
@@ -37,8 +36,8 @@ class InvitationCreateRequest(BaseModel):
 
     @validator("role")
     def validate_role(cls, v: InvitationRole):  # noqa: D401
-        if v not in {InvitationRole.admin, InvitationRole.dev}:
-            raise ValueError("Role must be 'admin' or 'dev'")
+        if v != InvitationRole.dev:
+            raise ValueError("Role must be 'dev'")
         return v
 
 

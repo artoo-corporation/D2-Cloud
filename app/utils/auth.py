@@ -103,7 +103,7 @@ async def _authenticate_token(
 
         # Extract user ID and role from the already-parsed JWT claims
         user_id = claims.get("sub")
-        role = claims.get("role") or claims.get("user_metadata", {}).get("role")
+        role = (claims.get("role") or "authenticated").lower()
         
         # Use database role if it was fetched by verify_supabase_jwt
         db_role = claims.get("db_role")
@@ -142,7 +142,7 @@ async def _authenticate_token(
                 )
         
         # Map role to scopes
-        if role in {"admin", "owner", "authenticated"}:
+        if role in {"owner", "dev", "authenticated"}:
             if requirement.strict:
                 # Explicit scopes for strict mode (include admin for admin_only endpoints)
                 scopes = [
@@ -162,7 +162,7 @@ async def _authenticate_token(
 
     # Expand shorthand scopes
     effective_scopes = set(scopes)
-    if "admin" in effective_scopes:
+    if "admin" in effective_scopes or role == "dev":
         effective_scopes |= {
             "policy.read", "policy.publish", "policy.revoke", "policy.revert",
             "key.upload", "event.ingest", "metrics.read"
