@@ -17,6 +17,7 @@ PLANS: Dict[str, Dict[str, Any]] = {
     "free": { # $0
         "max_tools": 5,
         "max_apps": 1,
+        "max_members": 2,  # Owner + 1 dev
         "min_poll": 300,
         "ingest_interval": 60,
         "max_batch_bytes": 32 * 1024,  # 32 KiB (events)
@@ -25,6 +26,7 @@ PLANS: Dict[str, Dict[str, Any]] = {
     "essentials": { # $99
         "max_tools": 25,
         "max_apps": 5,
+        "max_members": 5,  # Small team
         "min_poll": 60,
         "ingest_interval": 60,
         "max_batch_bytes": 128 * 1024,
@@ -33,6 +35,7 @@ PLANS: Dict[str, Dict[str, Any]] = {
     "pro": { # $250
         "max_tools": 250,
         "max_apps": 25,
+        "max_members": 15,  # Medium team
         "min_poll": 30,
         "ingest_interval": 30,
         "max_batch_bytes": 512 * 1024,
@@ -41,6 +44,7 @@ PLANS: Dict[str, Dict[str, Any]] = {
     "enterprise": { # $CUSTOM
         "max_tools": 1000,
         "max_apps": 100,
+        "max_members": 100,  # Large organization
         "min_poll": 10,
         "ingest_interval": 10,
         "max_batch_bytes": 1024 * 1024,
@@ -49,6 +53,7 @@ PLANS: Dict[str, Dict[str, Any]] = {
     "locked": {
         "max_tools": 5,
         "max_apps": 1,
+        "max_members": 1,  # Owner only (no invites allowed)
         "min_poll": 300,
         "ingest_interval": 60,
         "max_batch_bytes": 32 * 1024,  # 32 KiB (events)
@@ -178,3 +183,39 @@ def effective_plan(account: Dict[str, Any]) -> str:  # noqa: WPS231 (simple logi
 def get_plan_limit(plan: str, key: str, default: int | None = None) -> int:
     """Return a numeric limit for *plan* with optional fallback."""
     return int(PLANS.get(plan, {}).get(key, default or 0))
+
+
+async def enforce_member_limits(supabase, account_id: str, plan: str) -> None:
+    """Raise HTTPException if adding a new member would exceed plan quotas."""
+    
+    from fastapi import HTTPException, status  # local import to avoid heavy deps
+    from app.utils.database import query_many
+    
+    # Get current member count
+    try:
+        current_members = await query_many(
+            supabase,
+            "users",
+            match={"account_id": account_id},
+            select_fields="user_id",
+            limit=None
+        )
+        current_count = len(current_members)
+    except Exception:
+        # If we can't count members, be conservative and allow the invitation
+        # This prevents database issues from blocking legitimate invitations
+        return
+    
+    # Get plan limit
+    max_members = get_plan_limit(plan, "max_members", 1)
+    
+    # Check if adding one more member would exceed the limit
+    if current_count >= max_members:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="quota_members_exceeded",
+            headers={
+                "X-Current-Members": str(current_count),
+                "X-Max-Members": str(max_members)
+            }
+        )

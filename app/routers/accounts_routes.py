@@ -57,6 +57,21 @@ async def get_me(
         except ValueError:
             return default if default is not None else 0
 
+    # Get current member count
+    from app.utils.database import query_many
+    try:
+        current_members = await query_many(
+            supabase,
+            "users",
+            match={"account_id": auth.account_id},
+            select_fields="user_id",
+            limit=None
+        )
+        member_count = len(current_members)
+    except Exception:
+        # If we can't count members, default to 1 (assume at least the owner exists)
+        member_count = 1
+
     quotas = {
         "poll_sec": _env_int(
             f"{plan_prefix}_POLL_SEC",
@@ -64,6 +79,8 @@ async def get_me(
         ),
         "event_batch": _env_int(f"{plan_prefix}_EVENT_BATCH", 1000),
         "max_tools": get_plan_limit(plan, "max_tools"),
+        "max_members": get_plan_limit(plan, "max_members"),
+        "current_members": member_count,
         "event_payload_max_bytes": get_plan_limit(plan, "max_batch_bytes"),
     }
 

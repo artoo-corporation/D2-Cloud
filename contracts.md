@@ -143,6 +143,16 @@ Authorization: Bearer d2_[token_value]
 
 **Auth**: Any valid token
 
+**Member Quotas**: Each plan includes limits on the number of team members (users) per account:
+
+| Plan | Max Members | Description |
+|------|-------------|-------------|
+| Free | 2 | Owner + 1 dev |
+| Essentials | 5 | Small team |
+| Pro | 15 | Medium team |
+| Enterprise | 100 | Large organization |
+| Locked | 1 | Owner only (no invites) |
+
 **Response**:
 ```json
 {
@@ -152,6 +162,8 @@ Authorization: Bearer d2_[token_value]
     "poll_sec": 30,
     "event_batch": 1000,
     "max_tools": 50,
+    "max_members": 15,
+    "current_members": 3,
     "event_payload_max_bytes": 1048576
   },
   "metrics_enabled": true,

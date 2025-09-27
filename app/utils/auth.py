@@ -92,48 +92,51 @@ async def _authenticate_token(
             scopes = []
 
     else:
-        # Supabase JWT - get account_id and claims in one call
-        account_id, claims = await verify_supabase_jwt(token, admin_only=requirement.require_privileged, return_claims=True)
-
+        # Supabase JWT - validate JWT and get user_id from claims
+        jwt_user_id, claims = await verify_supabase_jwt(token, admin_only=False, return_claims=True)
+        
         # Extract user ID and role from the already-parsed JWT claims
         user_id = claims.get("sub")
         role = (claims.get("role") or "authenticated").lower()
         
-        # Use database role if it was fetched by verify_supabase_jwt
-        db_role = claims.get("db_role")
-        if db_role:
-            role = db_role
-        
-        # For owner/dev-only endpoints, look up user's actual role in database
-        # because JWT only contains "authenticated", not the D2 system role
-        if requirement.require_privileged and role == "authenticated":
-            from app.utils.database import query_one
+        # CRITICAL: For OAuth users, we need to look up their account_id from the users table
+        # because invited users belong to the inviter's account, not their own user_id
+        try:
+            user_row = await query_one(
+                supabase,
+                "users", 
+                match={"user_id": user_id},
+                select_fields="account_id,role"
+            )
             
-            try:
-                user_row = await query_one(
-                    supabase,
-                    "users", 
-                    match={"user_id": user_id},
-                    select_fields="role"
+            if user_row:
+                # Use the account_id from the users table (this is the key fix!)
+                account_id = user_row.get("account_id")
+                db_role = user_row.get("role")
+                if db_role:
+                    role = db_role
+            else:
+                # User not found in users table - this shouldn't happen for valid users
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN, 
+                    detail="user_not_found_in_system"
                 )
                 
-                if user_row and user_row.get("role") in {"owner", "dev"}:
-                    role = user_row.get("role")  # Use database role
-                else:
-                    # User not found or not owner/dev - deny access
-                    raise HTTPException(
-                        status_code=status.HTTP_403_FORBIDDEN, 
-                        detail="owner_or_dev_required"
-                    )
-                    
-            except HTTPException:
-                raise
-            except Exception as e:
-                # Database lookup failed - be conservative and deny access
-                raise HTTPException(
-                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE, 
-                    detail="database_lookup_failed"
-                )
+        except HTTPException:
+            raise
+        except Exception as e:
+            # Database lookup failed - be conservative and deny access
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE, 
+                detail="database_lookup_failed"
+            )
+        
+        # Additional privilege check for require_privileged endpoints
+        if requirement.require_privileged and role not in {"owner", "dev"}:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN, 
+                detail="owner_or_dev_required"
+            )
         
         # Determine privilege from role
         if role in {"owner", "dev"}:

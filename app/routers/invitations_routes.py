@@ -57,6 +57,14 @@ async def create_invitation(
     if auth.user_id is None:
         raise HTTPException(status_code=403, detail="supabase_session_required")
     
+    # Check member limits before proceeding
+    from app.utils.database import query_one as db_query_one
+    account = await db_query_one(supabase, "accounts", match={"id": auth.account_id})
+    if account:
+        from app.utils.plans import enforce_member_limits, effective_plan
+        current_plan = effective_plan(account)
+        await enforce_member_limits(supabase, auth.account_id, current_plan)
+    
     # Check if user already exists in the account
     existing_user = await query_one(
         supabase,
@@ -372,6 +380,15 @@ async def accept_invitation(
     
     if existing_user:
         raise HTTPException(status_code=409, detail="user_already_has_account")
+    
+    # Check member limits before adding user to account
+    # This is critical - we need to check limits at acceptance time, not just invitation time
+    # because the plan could have changed or other users might have been added
+    account = await query_one(supabase, "accounts", match={"id": invitation["account_id"]})
+    if account:
+        from app.utils.plans import enforce_member_limits, effective_plan
+        current_plan = effective_plan(account)
+        await enforce_member_limits(supabase, invitation["account_id"], current_plan)
     
     # Add user to the account
     await insert_data(
