@@ -5,10 +5,12 @@
 - Supported patterns:
   - `require_auth("policy.read")` – explicit scope
   - `require_auth(["policy.read", "metrics.read"])` – multiple scopes (all required)
-  - `require_auth(require_privileged=True)` – owner/dev via Supabase JWT or privileged API token (admin scope)
-  - `require_auth("metrics.read", strict=True)` – no admin wildcard; explicit scopes required
-  - `require_auth(require_privileged=True, require_user=True)` – must be a Supabase user session (user_id present)
+  - `require_auth(require_privileged=True)` – owner/dev via Supabase JWT or privileged API token
+  - `require_auth("metrics.read", strict=True)` – no wildcard; explicit scopes required
+  - `require_auth(require_user=True)` – must be a Supabase user session (user_id present)
 - Deprecated/removed: `require_scope`, `require_scope_strict`, `require_actor_admin`, `require_account_admin`, `require_token_admin`.
+- **Role Model**: Only `owner` (account creator) and `dev` (invited users) roles exist. No `admin` or `member` roles.
+- **API Tokens**: Only `dev` and `server` scopes available. No user assignment - tokens belong to the account.
 
 ### Accounts – event sampling
 - `GET /v1/accounts/me` now returns `event_sample: { [eventType]: float }`.
@@ -18,16 +20,18 @@
 
 ### Metrics endpoints
 - Base: `/v1/metrics` (private dashboard API)
-- Auth: `require_auth("metrics.read", strict=True)`
+- Auth: `require_auth(require_user=True)` – any authenticated OAuth user can access
 - Endpoints:
   - `GET /v1/metrics/summary`
   - `GET /v1/metrics/timeseries`
   - `GET /v1/metrics/top`
-- Backed by Supabase queries; in-app aggregation; gated by `accounts.metrics_enabled`.
+- Backed by Supabase queries; in-app aggregation; no longer gated by `accounts.metrics_enabled`.
 
 ### Tokens – performance notes (server-side only)
 - Token verification uses a fast lookup index `api_tokens.token_lookup` derived from the raw token via HMAC(pepper, sha256(token)). The pepper is the AES key `JWK_AES_KEY`.
 - If `token_lookup` is missing for legacy tokens, the first verification does a slow full-scan, then the server backfills `token_lookup` to make subsequent requests fast.
+- **Token Model**: Only `dev` and `server` tokens exist. No user assignment (`assigned_user_id` removed).
+- **App Association**: Tokens include `app_name` field for organization.
 - Recommended DB index:
   ```sql
   create index concurrently if not exists api_tokens_token_lookup_idx on api_tokens (token_lookup);
@@ -111,7 +115,9 @@ Authorization: Bearer d2_[token_value]
 
 ### Token Types & Scopes
 
-Tokens: Only two roles exist – dev (developer) and server (service). The internal admin scope is reserved for system-level compatibility but is not issued via the API.
+**API Token Types**: Only two roles exist – `dev` (developer) and `server` (service). No user assignment or admin tokens.
+
+**User Roles**: Only `owner` (account creator) and `dev` (invited users). All authenticated OAuth users can access dashboard content.
 
 ### Authentication Errors
 
@@ -201,8 +207,7 @@ if (account.trial_expires) {
 {
   "token_name": "My Dev Token",
   "scopes": ["dev"],
-  "app_name": "my-app",
-  "assigned_user_id": "user_uuid"
+  "app_name": "my-app"
 }
 ```
 
@@ -212,8 +217,7 @@ if (account.trial_expires) {
   "token_id": "uuid",
   "token": "d2_abc123...",
   "scopes": ["dev"],
-  "expires_at": null,
-  "app_name": "my-app"
+  "expires_at": null
 }
 ```
 
@@ -249,14 +253,13 @@ const createToken = async (data) => {
 [
   {
     "token_id": "uuid",
-    "name": "My Dev Token", 
+    "token_name": "My Dev Token", 
     "scopes": ["dev"],
     "created_at": "2024-01-01T00:00:00Z",
     "expires_at": null,
     "revoked_at": null,
     "app_name": "my-app",
-    "creator_name": "John Doe",
-    "assigned_user_name": "Jane Smith"
+    "created_by_name": "John Doe"
   }
 ]
 ```
@@ -293,10 +296,6 @@ const createToken = async (data) => {
 ```json
 [
   {
-    "scope": "admin",
-    "description": "Full access to all resources and settings"
-  },
-  {
     "scope": "dev", 
     "description": "Policy editing and key management for development"
   },
@@ -305,26 +304,6 @@ const createToken = async (data) => {
     "description": "Runtime policy access for production servers"
   }
 ]
-```
-
-### GET /v1/accounts/{account_id}/tokens/users
-
-**Purpose**: List users for token assignment dropdown
-
-**Auth**: Supabase JWT (owner/dev)
-
-**Response**:
-```json
-{
-  "users": [
-    {
-      "user_id": "uuid",
-      "display_name": "John Doe",
-      "email": "john@example.com", 
-      "full_name": "John Doe"
-    }
-  ]
-}
 ```
 
 ---
@@ -546,8 +525,8 @@ const safePublish = async () => {
 
 **Rate Limiting** (Updated 2025-08-28):
 - **Dev tokens**: No polling limits (developer-friendly for local development)
-- Privileged tokens (admin scope) have no polling limits – not issued by API; for internal/system use only.
 - **Server tokens**: Plan-based limits (30-300s for production)
+- **Privileged users**: Owner/dev OAuth sessions bypass polling limits
 
 ### 🔢 App Quota (NEW 2025-09-08)
 Each subscription plan limits the number of **published** apps (unique `app_name` values with published policies) per account:
@@ -1732,10 +1711,10 @@ Send the returned `invitation_url` to the invitee (email, Slack, etc.).
 ```json
 {
   "invitations": [
-    {
-      "id": "uuid",
-      "email": "newuser@example.com",
-      "role": "member",
+  {
+    "id": "uuid",
+    "email": "newuser@example.com", 
+    "role": "member",
       "invited_by_user_id": "user-123",
       "invited_by_name": "Alice",
       "expires_at": "2025-10-01T00:00:00Z",

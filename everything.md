@@ -2,13 +2,15 @@
 
 ### Centralized authentication
 - All routes migrated to `require_auth(...)` in `app/utils/auth.py`.
-- Patterns supported: explicit scopes, admin_only, strict (no wildcard), require_user.
+- Patterns supported: explicit scopes, require_privileged (owner/dev), strict (no wildcard), require_user.
+- **Role Model**: Only `owner` (account creator) and `dev` (invited users) roles exist. No `admin` or `member` roles.
+- **API Tokens**: Only `dev` and `server` scopes available. No user assignment - tokens belong to the account.
 - Old helpers removed: `require_scope`, `require_scope_strict`, `require_actor_admin`, `require_account_admin`, `require_token_admin`.
 
 ### Metrics API
 - New router at `/v1/metrics` with `summary`, `timeseries`, and `top` endpoints.
-- Authorization: `require_auth("metrics.read", strict=True)`.
-- Aggregation via Supabase; gated by `accounts.metrics_enabled`.
+- Authorization: `require_auth(require_user=True)` - any authenticated OAuth user can access.
+- Aggregation via Supabase; no longer gated by `accounts.metrics_enabled`.
 
 ### Accounts – event sampling returned by `/v1/accounts/me`
 - `event_sample` object with per-event probabilities in `[0,1]`.
@@ -148,7 +150,7 @@ async def handler(auth: AuthContext = Depends(require_scope("policy.read"))):
     # Direct access: auth.account_id, auth.scopes, auth.user_id, etc.
     
 # Helper methods
-auth.has_scope("admin")  # Check specific scope
+auth.is_privileged  # Check if owner/dev user
 auth.is_dev()           # Check if dev token
 auth.is_admin()         # Check if privileged (owner/dev) user
 ```
@@ -177,19 +179,18 @@ All paths below are fully-qualified with the base URL `https://d2.artoo.love`.
 | Method | Path | Auth | Description |
 | ------ | ---- | ---- | ----------- |
 | GET | `/v1/accounts/me` | Bearer token | Returns plan info, quotas, and account metadata. |
-| POST | `/v1/accounts/{account_id}/tokens` | Supabase JWT | Creates **long-lived opaque API key** with app assignment and user assignment. |
-| POST | `/v1/accounts/{account_id}/tokens/server` | Privileged token (admin scope) | **NEW**: Creates server tokens (not user-assigned) with fixed `server` scope for production systems. |
-| GET | `/v1/accounts/{account_id}/tokens` | Supabase JWT | Lists tokens with creator/assignee names. |
+| POST | `/v1/accounts/{account_id}/tokens` | Supabase JWT | Creates **long-lived opaque API key** with app association. |
+| POST | `/v1/accounts/{account_id}/tokens/server` | Supabase JWT (owner/dev) | **NEW**: Creates server tokens with fixed `server` scope for production systems. |
+| GET | `/v1/accounts/{account_id}/tokens` | Supabase JWT | Lists tokens with creator names. |
 | DELETE | `/v1/accounts/{account_id}/tokens/{token_id}` | Supabase JWT | Revokes token. |
 | POST | `/v1/accounts/{account_id}/tokens/{token_id}/rotate` | Supabase JWT | **NEW**: Generates new token value, revokes old one. |
 | GET | `/v1/accounts/{account_id}/tokens/scopes` | Supabase JWT | **NEW**: Lists available scopes for token creation UI. |
-| GET | `/v1/accounts/{account_id}/tokens/users` | Supabase JWT | **NEW**: Lists users for token assignment dropdown. |
 
 **Key Changes (2025-08-28 & 2025-09-04):**
-- Token creation now supports `app_name` and `assigned_user_id` for better organization
+- Token creation now supports `app_name` for better organization
 - All app names are automatically normalized (spaces → underscores)
 - Authentication switched to Supabase JWTs for dashboard-only access
-- **NEW**: Server tokens for production systems (no user assignment, fixed `server` scope)
+- **NEW**: Server tokens for production systems (fixed `server` scope, no user assignment)
 
 ### 5.2 Policy Service (`app/routers/policy_routes.py` – prefix `/v1/policy`)
 
@@ -238,9 +239,9 @@ All paths below are fully-qualified with the base URL `https://d2.artoo.love`.
 | Method | Path | Auth | Description |
 | ------ | ---- | ---- | ----------- |
 | GET | `/.well-known/jwks.json` | None | **Public discovery** endpoint (rate-limited 60/min). Enhanced with debugging headers and 60s cache control. |
-| GET | `/v1/jwks/configuration` | Privileged token (admin scope) | **NEW**: Get current JWKS configuration for dashboard display. |
-| GET | `/v1/jwks/history` | Privileged token (admin scope) | **NEW**: Get complete JWKS rotation history and key lifecycle. |
-| POST | `/v1/jwks/rotate` | Privileged token (admin scope) | **Automated rotation** with zero-disruption policy re-signing and smart cleanup. |
+| GET | `/v1/jwks/configuration` | Supabase JWT (owner/dev) | **NEW**: Get current JWKS configuration for dashboard display. |
+| GET | `/v1/jwks/history` | Supabase JWT (owner/dev) | **NEW**: Get complete JWKS rotation history and key lifecycle. |
+| POST | `/v1/jwks/rotate` | Supabase JWT (owner/dev) | **Automated rotation** with zero-disruption policy re-signing and smart cleanup. |
 
 **Key Features (2025-09-04):**
 - **Fully Automated Rotation**: Single API call triggers complete key lifecycle management
@@ -341,7 +342,7 @@ All paths below are fully-qualified with the base URL `https://d2.artoo.love`.
 * **Developer token** – scopes `dev` → shorthand for `policy.read`, `policy.publish`, `key.upload`, `event.ingest`.
 * **Server token** – scopes `server` → shorthand for `policy.read`, `event.ingest` (read-only).
 
-Production servers **must use** `server` tokens; developer laptops/CI **should use** `dev` tokens.  Privileged tokens (`admin` scope) retain full CRUD capability and are typically created via the dashboard by an account owner.
+Production servers **must use** `server` tokens; developer laptops/CI **should use** `dev` tokens. No user assignment - tokens belong to the account.
 
 Supported individual scopes:
 
@@ -352,16 +353,14 @@ Supported individual scopes:
 * `key.upload` – manage public signing keys
 * `event.ingest` – send usage events
 * `metrics.read` – **NEW**: access events and dashboard metrics
-* `admin` – **NEW**: full system access including audit logs
 * Composite shorthands: 
   - `dev` → `policy.read` + `policy.publish` + `key.upload`
   - `server` → `policy.read` + `event.ingest` (read-only)
-  - `admin` (API token scope) → wildcard access to all scopes
 
 **Key Changes (2025-08-28):**
 - Granular scopes for advanced policy operations (revoke, revert)
 - Separate `metrics.read` scope for dashboard access
-- Developer-friendly polling: `dev` and privileged (admin-scope) tokens bypass rate limits
+- Developer-friendly polling: `dev` tokens and privileged OAuth users (owner/dev) bypass rate limits
 
 ### 5.7 Audit & Telemetry
 
@@ -385,7 +384,7 @@ The code interacts with these tables (names are hard-coded):
 | Table | Purpose |
 | ----- | ------- |
 | `accounts` | Tenant metadata (plan, trial expiry, metrics toggle, etc.). |
-| `api_tokens` | Bearer token store (`token_id`, bcrypt-hashed `token_sha256`, scopes, expiry, revoked_at, `assigned_user_id`, `created_by_user_id`, `app_name`). **NEW**: Enhanced with user tracking and server token support. |
+| `api_tokens` | Bearer token store (`token_id`, bcrypt-hashed `token_sha256`, scopes, expiry, revoked_at, `created_by_user_id`, `app_name`). **Updated**: Removed `assigned_user_id`, enhanced with app association. |
 | `events` | Raw usage events (mirrored from ingest endpoint). |
 | `export_state` | Single-row high-water mark for Cron export to ClickHouse. |
 | `jwks_keys` | RSA key pairs per tenant (`kid`, `public_jwk`, encrypted `private_jwk`). |
@@ -411,7 +410,7 @@ The code interacts with these tables (names are hard-coded):
 ## 8. Security Measures
 
 1. **Bearer tokens** – bcrypt-salted SHA-256 digests; verification traverses all rows to support legacy clear hashes.
-2. **Privileged (admin) scope** – actions that mutate state (token creation, key rotation, policy publication) require `admin` scope.
+2. **Privileged access** – actions that mutate state (token creation, key rotation, policy publication) require owner/dev roles or privileged API tokens.
 3. **Rate-limiting** – IP-based (`SlowAPI`) global limit plus router-specific JWKS limit.
 4. **AES-GCM encryption** – private RSA keys are encrypted server-side at rest using tenant-wide `JWK_AES_KEY`.
 5. **Plan enforcement** – batch size, ingest interval, poll interval, and tool-count checked on each request.

@@ -80,20 +80,6 @@ async def create_token(
     if auth.account_id != account_id:
         raise HTTPException(status_code=403, detail="account_mismatch")
 
-    # Handle assigned_user_id: validate that the target user belongs to the same account
-    assigned_user_id = payload.assigned_user_id if payload else None
-    if assigned_user_id:
-        # Verify the assigned user belongs to the same account
-        user_check = await query_one(
-            supabase,
-            "users",
-            match={"user_id": assigned_user_id, "account_id": auth.account_id}
-        )
-        if not user_check:
-            raise HTTPException(status_code=400, detail="assigned_user_not_in_account")
-    else:
-        # Default to current user
-        assigned_user_id = auth.user_id
 
     # Determine token role (only 'dev' or 'server' allowed)
     scopes: list[str]
@@ -129,7 +115,6 @@ async def create_token(
             "scopes": scopes,
             "expires_at": None,
             "created_by_user_id": auth.user_id,  # Who created the token
-            "assigned_user_id": assigned_user_id,  # Who owns/uses the token
             "app_name": normalize_app_name(payload.app_name) if payload and payload.app_name else None,
         },
     )
@@ -148,7 +133,6 @@ async def create_token(
             "token_name": payload.token_name if payload else None,
             "scopes": scopes,
             "app_name": normalize_app_name(payload.app_name) if payload and payload.app_name else None,
-            "assigned_user_id": assigned_user_id,
         },
     )
 
@@ -198,7 +182,7 @@ async def create_server_token(
     token_sha = sha256(raw_token.encode()).hexdigest()
     hashed_token = await hash_token(token_sha)
     
-    # Insert into database (no assigned_user_id for server tokens)
+    # Insert into database
     await insert_data(
         supabase,
         "api_tokens",
@@ -210,7 +194,6 @@ async def create_server_token(
             "scopes": [s.value for s in scopes],
             "token_name": payload.token_name if payload else "Server Token",
             "app_name": payload.app_name if payload else None,
-            "assigned_user_id": None,  # Server tokens are not user-assigned
             "created_by_user_id": auth.user_id,  # Track who created the server token
             "expires_at": None,  # Server tokens don't expire by default
         },

@@ -187,7 +187,6 @@ class TokenCreateRequest(BaseModel):
         description="Token capability scopes",
     )
     app_name: Optional[str] = Field(None, description="Associate token with specific app")
-    assigned_user_id: Optional[str] = Field(None, description="Assign token to specific user (defaults to current user)")
 
 class ServerTokenRequest(BaseModel):
     """Request model for creating server tokens (not assigned to individual users)."""
