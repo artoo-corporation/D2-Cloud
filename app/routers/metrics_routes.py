@@ -2,8 +2,7 @@ from __future__ import annotations
 
 """Metrics endpoints for the dashboard (Supabase-backed).
 
-All endpoints require explicit `metrics.read` via strict scope check and
-`accounts.metrics_enabled = true` for the caller's account.
+All endpoints require authenticated Supabase users (owner/dev roles).
 """
 
 from datetime import datetime, timedelta, timezone
@@ -25,20 +24,6 @@ from app.utils.database import query_one, query_many
 
 
 router = APIRouter(prefix="/v1/metrics", tags=["metrics"])
-
-
-async def _ensure_metrics_enabled(supabase, account_id: str, auth_context: AuthContext) -> dict:
-    account = await query_one(supabase, "accounts", match={"id": account_id})
-    if not account:
-        raise HTTPException(status_code=404, detail="account_not_found")
-    
-    # Owner/dev users can always access metrics (bypass metrics_enabled check)
-    if auth_context.is_privileged or "metrics.read" in auth_context.scopes:
-        return account
-        
-    if not account.get("metrics_enabled", False):
-        raise HTTPException(status_code=403, detail="metrics_disabled")
-    return account
 
 
 def _parse_timerange(
@@ -112,9 +97,6 @@ async def get_summary(
     """Overall month-style summary (configurable range)."""
     start, end = _parse_timerange(start, end, default_days=30)
 
-    # Gate by account setting
-    await _ensure_metrics_enabled(supabase, auth.account_id, auth)
-
     # Pull relevant events within range
     rows = await query_many(
         supabase,
@@ -181,7 +163,6 @@ async def get_timeseries(
     """Allowed vs denied over a recent window (default past week)."""
     end = datetime.now(timezone.utc)
     start = end - timedelta(days=days)
-    await _ensure_metrics_enabled(supabase, auth.account_id, auth)
 
     rows = await query_many(
         supabase,
@@ -244,7 +225,6 @@ async def get_top(
     """Top N by tools/resources/event_type for the period."""
     end = datetime.now(timezone.utc)
     start = end - timedelta(days=days)
-    await _ensure_metrics_enabled(supabase, auth.account_id, auth)
 
     select_fields = "event_type,payload,occurred_at"
     rows = await query_many(

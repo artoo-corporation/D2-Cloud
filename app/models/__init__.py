@@ -207,6 +207,7 @@ class APITokenResponse(BaseModel):
     expires_at: Optional[datetime]
     revoked_at: Optional[datetime]
     token_name: Optional[str] = None
+    app_name: Optional[str] = None
     created_at: Optional[datetime] = None
     created_by_name: Optional[str] = None
 

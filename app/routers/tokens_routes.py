@@ -259,7 +259,7 @@ async def list_tokens(
         supabase,
         API_TOKEN_TABLE,
         filters={"account_id": auth.account_id},
-        select_fields="token_id,token_name,scopes,expires_at,revoked_at,created_by_user_id,created_at",
+        select_fields="token_id,token_name,app_name,scopes,expires_at,revoked_at,created_by_user_id,created_at",
     )
 
     rows = getattr(resp, "data", None) or []
