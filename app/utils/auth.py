@@ -180,21 +180,21 @@ async def _authenticate_token(
                     detail="insufficient_scope",
                 )
 
-        # Ensure account_id is not None
-        if not account_id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"account_id_is_none_for_user_{user_id}"
-            )
-        
-        return AuthContext(
-            account_id=account_id,
-            scopes=list(scopes),
-            is_privileged=is_privileged,
-            user_id=user_id,
-            token_id=token_id,
-            app_name=app_name,
+    # Ensure account_id is not None
+    if not account_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"account_id_is_none_for_user_{user_id}"
         )
+    
+    return AuthContext(
+        account_id=account_id,
+        scopes=list(scopes),
+        is_privileged=is_privileged,
+        user_id=user_id,
+        token_id=token_id,
+        app_name=app_name,
+    )
 
 
 def require_auth(
