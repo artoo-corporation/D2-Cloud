@@ -320,9 +320,17 @@ async def get_accept_invitation_page(
         match={"user_id": invitation["invited_by_user_id"]}
     )
     
+    # Fetch account name for display (authoritative)
+    account = await query_one(
+        supabase,
+        "accounts",
+        match={"id": invitation["account_id"]}
+    )
+    account_name = (account or {}).get("name") or invitation.get("account_name", "Unknown")
+    
     # Return invitation details for the acceptance page
     return PendingInvitationInfo(
-        account_name=invitation.get("account_name", "Unknown Organization"),
+        account_name=account_name,
         invited_by_name=inviter.get("display_name") or inviter.get("full_name") or "Unknown User",
         role=invitation["role"],
         expires_at=expires_at
