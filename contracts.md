@@ -156,6 +156,7 @@ Authorization: Bearer d2_[token_value]
 **Response**:
 ```json
 {
+  "account_id": "6359c37c-fe0b-4bcf-aa5f-d15f0c40cdc7",
   "plan": "pro",
   "trial_expires": "2024-12-31T23:59:59Z",
   "quotas": {
@@ -176,6 +177,9 @@ Authorization: Bearer d2_[token_value]
   }
 }
 ```
+
+Note:
+- `account_id` is returned for frontend routing convenience. All account-scoped server routes still enforce `auth.account_id == {account_id}`; knowing an ID does not grant access.
 
 **Event Sampling Semantics**
 
