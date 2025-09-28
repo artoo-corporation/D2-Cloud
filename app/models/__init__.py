@@ -95,6 +95,9 @@ class AuditAction(str, Enum):
     invitation_accept = "invitation.accept"
     invitation_cancel = "invitation.cancel"
     
+    # Account operations (NEW)
+    account_update = "account.update"
+    
     # Authentication/Authorization operations (NEW 2025-09-15)
     auth_failure = "auth.failure"
     auth_success = "auth.success"

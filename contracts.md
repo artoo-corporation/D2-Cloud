@@ -181,6 +181,41 @@ Authorization: Bearer d2_[token_value]
 Note:
 - `account_id` is returned for frontend routing convenience. All account-scoped server routes still enforce `auth.account_id == {account_id}`; knowing an ID does not grant access.
 
+### PATCH /v1/accounts/{account_id}/name
+
+**Purpose**: Rename the organization (account display name).
+
+**Auth**: Supabase JWT (owner/dev). Caller must belong to the target account.
+
+**Request**:
+```json
+{
+  "name": "New Organization Name"
+}
+```
+
+**Responses**:
+```json
+// 200 OK – updated
+{ "message": "account_name_updated", "name": "Acme Inc" }
+
+// 200 OK – no-op (same name)
+{ "message": "account_name_unchanged", "name": "Acme Inc" }
+
+// 400 Bad Request – invalid
+{ "detail": "invalid_account_name" }
+
+// 403 Forbidden – different account
+{ "detail": "account_mismatch" }
+
+// 404 Not Found – account missing
+{ "detail": "account_not_found" }
+```
+
+**Notes**:
+- Idempotent if name is unchanged.
+- Audited as `account.update` with old/new values and user context.
+
 **Event Sampling Semantics**
 
 - `event_sample` provides server-driven sampling probabilities per event type used by SDKs to throttle raw telemetry volume.

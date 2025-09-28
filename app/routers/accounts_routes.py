@@ -22,10 +22,12 @@ import os  # placed here to avoid polluting top-matter
 import json
 from fastapi import Header, HTTPException
 
-from app.models import AuthContext, MeResponse
+from app.models import AuthContext, MeResponse, AuditAction, AuditStatus
 from app.utils.plans import effective_plan, get_plan_limit
-from app.utils.database import query_one
+from app.utils.database import query_one, update_data
 from app.utils.auth import require_auth
+from pydantic import BaseModel, Field
+from app.utils.audit import log_audit_event
 
 
 @router.get("/me", response_model=MeResponse)
@@ -181,3 +183,64 @@ async def get_me(
         account_id=auth.account_id,
     )
 
+
+class AccountNameUpdateRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200, description="New organization name")
+
+
+@router.patch("/{account_id}/name", status_code=status.HTTP_200_OK)
+async def update_account_name(
+    account_id: str = Path(..., description="Account ID to update"),
+    payload: AccountNameUpdateRequest = ...,  # Provided by FastAPI from JSON body
+    auth: AuthContext = Depends(require_auth(require_privileged=True, require_user=True)),
+    supabase=Depends(get_supabase_async),
+):
+    """Update the organization's display name.
+
+    Security:
+    - Caller must be an OAuth user (require_user=True)
+    - Caller must be owner/dev of the same account (require_privileged=True + account match)
+    """
+
+    if auth.account_id != account_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="account_mismatch")
+
+    # Fetch current to detect no-op
+    current = await query_one(supabase, "accounts", match={"id": account_id})
+    if not current:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="account_not_found")
+
+    new_name = payload.name.strip()
+    if not new_name:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid_account_name")
+
+    if current.get("name") == new_name:
+        # Idempotent no-op
+        return {"message": "account_name_unchanged", "name": new_name}
+
+    await update_data(
+        supabase,
+        "accounts",
+        update_values={"name": new_name},
+        filters={"id": account_id},
+        error_message="account_update_failed",
+    )
+
+    # Audit
+    await log_audit_event(
+        supabase,
+        action=AuditAction.account_update,
+        actor_id=auth.account_id,
+        status=AuditStatus.success,
+        token_id=auth.token_id,
+        user_id=auth.user_id,
+        resource_type="account",
+        resource_id=account_id,
+        metadata={
+            "field": "name",
+            "old": current.get("name"),
+            "new": new_name,
+        },
+    )
+
+    return {"message": "account_name_updated", "name": new_name}
