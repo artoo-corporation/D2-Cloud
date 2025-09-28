@@ -169,6 +169,7 @@ class MeResponse(BaseModel):
     metrics_enabled: bool
     poll_seconds: int
     event_sample: Dict[str, float] = Field(default_factory=dict, description="Per-event sampling probabilities [0..1]")
+    account_id: Optional[str] = Field(None, description="Caller account ID for building account-scoped routes")
 
 class EventsBatch(BaseModel):
     events: List[Dict[str, Any]]

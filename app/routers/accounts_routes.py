@@ -178,5 +178,6 @@ async def get_me(
         metrics_enabled=account.get("metrics_enabled", False),
         poll_seconds=quotas["poll_sec"],
         event_sample=merged,
+        account_id=auth.account_id,
     )
 
