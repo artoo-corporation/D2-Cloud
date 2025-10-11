@@ -155,6 +155,10 @@ def create_app() -> FastAPI:  # noqa: C901
     from app.routers.leads_routes import router as leads_router
     public_app.include_router(leads_router)
 
+    # Add Stripe webhook (public)
+    from app.routers.stripe_webhooks import public_router as stripe_public_router
+    public_app.include_router(stripe_public_router)
+
     # Mount at /public (eg. /public/.well-known/jwks.json)
     app.mount("/public", public_app)
 

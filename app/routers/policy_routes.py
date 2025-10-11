@@ -30,7 +30,7 @@ from app.utils.database import insert_data, query_one, query_many, update_data, 
 from app.utils.dependencies import get_supabase_async
 from app.utils.security_utils import verify_api_token
 from app.utils.utils import normalize_app_name
-from app.utils.plans import enforce_bundle_poll, get_plan_limit, effective_plan
+from app.utils.plans import enforce_bundle_poll, resolve_plan_name, get_plan_limit_db, get_plan_limits_db
 import base64
 from app.utils.auth import require_auth
 from app.utils.logger import logger
@@ -180,9 +180,9 @@ async def get_policy_bundle(
 
     # 4️⃣  Basic plan / quota enforcement (bundle size)
     account = await query_one(supabase, "accounts", match={"id": auth.account_id})
-    plan = effective_plan(account)
-    # Max bundle size by plan (bytes)
-    size_limit = get_plan_limit(plan, "max_bundle_bytes", int(0.5 * 1024 * 1024))
+    plan = await resolve_plan_name(supabase, account)
+    # Max bundle size by plan (bytes) from DB (fallback inside helper)
+    size_limit = await get_plan_limit_db(supabase, plan, "max_bundle_bytes", int(0.5 * 1024 * 1024))
 
     # For drafts there is no JWS yet – use raw bundle for size check / ETag
     if row.get("jws"):
@@ -197,12 +197,9 @@ async def get_policy_bundle(
     # If the account has an explicit per-tenant poll_seconds override we honour the
     # *smaller* of (override, plan default). This way upgrading plan immediately
     # lowers the minimum poll window without requiring a manual DB update.
-    plan_min_poll = get_plan_limit(plan, "min_poll", 60)
-    acct_override = (account or {}).get("poll_seconds")
-    if acct_override is not None:
-        poll_seconds = min(int(acct_override), plan_min_poll)
-    else:
-        poll_seconds = plan_min_poll
+    limits = await get_plan_limits_db(supabase, plan)
+    plan_min_poll = limits.get("min_poll", 60)
+    poll_seconds = plan_min_poll
     try:
         # Pass token scopes to enable dev-friendly polling
         enforce_bundle_poll(auth.account_id, poll_seconds, auth.scopes)
@@ -469,8 +466,8 @@ async def publish_policy(
     
     # Get account and plan information for quota enforcement
     account = await query_one(supabase, "accounts", match={"id": auth.account_id})
-    plan_name = effective_plan(account)
-    max_apps = get_plan_limit(plan_name, "max_apps")
+    plan_name = await resolve_plan_name(supabase, account)
+    max_apps = (await get_plan_limit_db(supabase, plan_name, "max_apps", 0))
     
     # Check existing PUBLISHED apps for this account (drafts don't count toward quota)
     resp_apps = await query_data(
@@ -632,7 +629,8 @@ async def publish_policy(
     etag = sha256(jws.encode()).hexdigest()
 
     # Determine poll-seconds (account-level override or default by plan)
-    plan_min_poll = get_plan_limit(plan_name, "min_poll", 60)
+    plan_min_poll = (await get_plan_limits_db(supabase, plan_name)).get("min_poll", 60)
+    logger.info(f"Plan min poll: {plan_min_poll}")
     acct_override = (account or {}).get("poll_seconds")
     if acct_override is not None:
         poll_seconds = min(int(acct_override), plan_min_poll)
@@ -986,6 +984,30 @@ async def list_roles_and_permissions(
     }
 
 
+@router.get("/apps", response_model=list[str])
+async def list_app_names(
+    auth: AuthContext = Depends(require_auth("policy.read")),
+    supabase=Depends(get_supabase_async),
+):
+    """Return distinct app names for this account (for token creation dropdown)."""
+
+    rows_raw = await query_many(
+        supabase,
+        POLICY_TABLE,
+        match={"account_id": auth.account_id},
+        select_fields="app_name",
+    )
+
+    rows = rows_raw if isinstance(rows_raw, list) else getattr(rows_raw, "data", [])
+    app_names = list(set(r["app_name"] for r in rows if r.get("app_name")))
+
+    # Always include "default" as an option
+    if "default" not in app_names:
+        app_names.append("default")
+
+    return sorted(app_names)
+
+
 @router.get("/{policy_id}", response_model=PolicySummary)
 async def get_policy_detail(
     policy_id: str,
@@ -1152,30 +1174,6 @@ async def validate_policy_bundle(
         warnings=warnings,
         metadata=metadata
     )
-
-
-@router.get("/apps", response_model=list[str])
-async def list_app_names(
-    auth: AuthContext = Depends(require_auth("policy.read")),
-    supabase=Depends(get_supabase_async),
-):
-    """Return distinct app names for this account (for token creation dropdown)."""
-    
-    rows_raw = await query_many(
-        supabase,
-        POLICY_TABLE,
-        match={"account_id": auth.account_id},
-        select_fields="DISTINCT app_name",
-    )
-    
-    rows = rows_raw if isinstance(rows_raw, list) else getattr(rows_raw, "data", [])
-    app_names = [r["app_name"] for r in rows if r.get("app_name")]
-    
-    # Always include "default" as an option
-    if "default" not in app_names:
-        app_names.append("default")
-    
-    return sorted(app_names)
 
 
 @router.get("/roles-permissions")

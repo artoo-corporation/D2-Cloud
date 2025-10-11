@@ -9,64 +9,14 @@ limits consistently (trial locking, tool counts, poll windows, etc.).
 from datetime import datetime, timezone
 from typing import Dict, Any
 
-# ---------------------------------------------------------------------------
-# Public constants
-# ---------------------------------------------------------------------------
-
-PLANS: Dict[str, Dict[str, Any]] = {
-    "free": { # $0
-        "max_tools": 5,
-        "max_apps": 1,
-        "max_members": 2,  # Owner + 1 dev
-        "min_poll": 300,
-        "ingest_interval": 60,
-        "max_batch_bytes": 32 * 1024,  # 32 KiB (events)
-        "max_bundle_bytes": int(0.5 * 1024 * 1024),  # 0.5 MiB
-    },
-    "essentials": { # $99
-        "max_tools": 25,
-        "max_apps": 5,
-        "max_members": 5,  # Small team
-        "min_poll": 60,
-        "ingest_interval": 60,
-        "max_batch_bytes": 128 * 1024,
-        "max_bundle_bytes": int(2 * 1024 * 1024),  # 2 MiB
-    },
-    "pro": { # $250
-        "max_tools": 250,
-        "max_apps": 25,
-        "max_members": 15,  # Medium team
-        "min_poll": 30,
-        "ingest_interval": 30,
-        "max_batch_bytes": 512 * 1024,
-        "max_bundle_bytes": int(5 * 1024 * 1024),  # 5 MiB
-    },
-    "enterprise": { # $CUSTOM
-        "max_tools": 1000,
-        "max_apps": 100,
-        "max_members": 100,  # Large organization
-        "min_poll": 10,
-        "ingest_interval": 10,
-        "max_batch_bytes": 1024 * 1024,
-        "max_bundle_bytes": int(20 * 1024 * 1024),  # 20 MiB
-    },
-    "locked": {
-        "max_tools": 5,
-        "max_apps": 1,
-        "max_members": 1,  # Owner only (no invites allowed)
-        "min_poll": 300,
-        "ingest_interval": 60,
-        "max_batch_bytes": 32 * 1024,  # 32 KiB (events)
-        "max_bundle_bytes": int(0.5 * 1024 * 1024),  # 0.5 MiB
-    },
-}
-
+# Exports
 __all__ = [
-    "PLANS",
     "effective_plan",
-    "get_plan_limit",
+    "get_plan_limit_db",
+    "get_plan_limits_db",
     "enforce_event_limits",
     "enforce_bundle_poll",
+    # legacy get_plan_limit removed – use async helpers instead
 ]
 
 # ---------------------------------------------------------------------------
@@ -78,25 +28,31 @@ _last_bundle_poll_ts: Dict[str, float] = {}
 
 
 # ---------------------------------------------------------------------------
+# No in-code plan quotas – all limits come from the database table.
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
 # Enforcement helpers (moved from old plan_limits.py)
 # ---------------------------------------------------------------------------
 
 
-def enforce_event_limits(account_id: str, plan: str, payload_size: int) -> None:
+async def enforce_event_limits(supabase, account_id: str, plan: str, payload_size: int) -> None:
     """Raise HTTPException if the event ingest exceeds plan quotas."""
 
     from fastapi import HTTPException, status  # local import to avoid heavy deps
     import time
 
-    # 1) Batch size cap
-    if payload_size > get_plan_limit(plan, "max_batch_bytes"):
+    # 1) Batch size cap (DB-driven, fallback to constants)
+    max_batch_bytes = await get_plan_limit_db(supabase, plan, "max_batch_bytes", 0)
+    if payload_size > max_batch_bytes:
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             detail="event_batch_too_large",
         )
 
     # 2) Determine allowed interval (None => not allowed)
-    interval = PLANS.get(plan, {}).get("ingest_interval", 60)
+    interval = (await get_plan_limits_db(supabase, plan)).get("ingest_interval", 60)
     if interval is None:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="plan_no_ingest")
 
@@ -161,7 +117,8 @@ def effective_plan(account: Dict[str, Any]) -> str:  # noqa: WPS231 (simple logi
     to duplicate the date-math.
     """
 
-    plan = (account or {}).get("plan", "free")
+    # Prefer plan_id (FK to plans.name) if present; fallback to legacy 'plan' column
+    plan = (account or {}).get("plan_id") or (account or {}).get("plan", "free")
 
     if plan == "trial":
         expires_iso = account.get("trial_expires")
@@ -180,9 +137,37 @@ def effective_plan(account: Dict[str, Any]) -> str:  # noqa: WPS231 (simple logi
     return plan
 
 
-def get_plan_limit(plan: str, key: str, default: int | None = None) -> int:
-    """Return a numeric limit for *plan* with optional fallback."""
-    return int(PLANS.get(plan, {}).get(key, default or 0))
+async def get_plan_limits_db(supabase, plan: str) -> Dict[str, int]:
+    """Fetch plan limits from database `plans` table.
+
+    Table schema expected (plans):
+      name text primary key,
+      max_tools int, max_apps int, max_members int,
+      min_poll int, ingest_interval int,
+      max_batch_bytes int, max_bundle_bytes int
+    """
+    try:
+        from app.utils.database import query_one  # local import
+        row = await query_one(supabase, "plans", match={"name": plan})
+        if not row:
+            return {}
+        # Coerce to ints and return
+        limits: Dict[str, int] = {}
+        for k in ("max_tools","max_apps","max_members","min_poll","ingest_interval","max_batch_bytes","max_bundle_bytes"):
+            if row.get(k) is not None:
+                limits[k] = int(row.get(k))
+        return limits
+    except Exception:
+        # On any DB error, return empty dict so callers fall back to defaults
+        return {}
+
+
+async def get_plan_limit_db(supabase, plan: str, key: str, default: int | None = None) -> int:
+    limits = await get_plan_limits_db(supabase, plan)
+    if key in limits:
+        return int(limits[key])
+    # Fallback to caller-provided default (or 0)
+    return int(default or 0)
 
 
 async def enforce_member_limits(supabase, account_id: str, plan: str) -> None:
@@ -206,8 +191,8 @@ async def enforce_member_limits(supabase, account_id: str, plan: str) -> None:
         # This prevents database issues from blocking legitimate invitations
         return
     
-    # Get plan limit
-    max_members = get_plan_limit(plan, "max_members", 1)
+    # Get plan limit (DB-driven, fallback to constants)
+    max_members = await get_plan_limit_db(supabase, plan, "max_members", 1)
     
     # Check if adding one more member would exceed the limit
     if current_count >= max_members:
@@ -219,3 +204,47 @@ async def enforce_member_limits(supabase, account_id: str, plan: str) -> None:
                 "X-Max-Members": str(max_members)
             }
         )
+
+# ---------------------------------------------------------------------------
+# Async helper to resolve plan name via plan_id FK
+# ---------------------------------------------------------------------------
+
+
+async def resolve_plan_name(supabase, account: Dict[str, Any]) -> str:  # noqa: WPS231
+    """Return the plan *name* for given account row.
+
+    Handles both legacy ``accounts.plan`` text column and new ``accounts.plan_id``
+    foreign-key to ``plans.id``.
+    """
+
+    # Prefer FK lookup
+    plan_id = (account or {}).get("plan_id")
+    if plan_id:
+        try:
+            from app.utils.database import query_one  # local import to avoid heavy deps
+
+            row = await query_one(supabase, "plans", match={"id": plan_id}, select_fields="name")
+            if row and row.get("name"):
+                plan = row["name"]
+            else:
+                plan = "free"  # fallback if FK broken
+        except Exception:
+            plan = "free"
+    else:
+        plan = (account or {}).get("plan", "free")
+
+    # Trial expiry logic (same as effective_plan)
+    if plan == "trial":
+        expires_iso = account.get("trial_expires")
+        if expires_iso:
+            if isinstance(expires_iso, str):
+                expires_dt = datetime.fromisoformat(expires_iso).astimezone(timezone.utc)
+            else:
+                expires_dt = expires_iso
+            if expires_dt < utc_now():
+                return "locked"
+        return "free"
+
+    return plan
+
+__all__.append("resolve_plan_name")

@@ -23,7 +23,7 @@ import json
 from fastapi import Header, HTTPException
 
 from app.models import AuthContext, MeResponse, AuditAction, AuditStatus
-from app.utils.plans import effective_plan, get_plan_limit
+from app.utils.plans import resolve_plan_name, get_plan_limits_db
 from app.utils.database import query_one, update_data
 from app.utils.auth import require_auth
 from pydantic import BaseModel, Field
@@ -41,14 +41,9 @@ async def get_me(
     if not account:
         raise HTTPException(status_code=404, detail="Account not found")
 
-    plan = effective_plan(account)
-    _prefix_map = {
-        "pro": "PRO",
-        "enterprise": "ENTERPRISE",
-        "essentials": "ESSENTIALS",
-        "free": "FREE",
-    }
-    plan_prefix = _prefix_map.get(plan, "FREE")
+    plan = await resolve_plan_name(supabase, account)
+    # Convert plan name to upper-case prefix for env variable look-ups (e.g. ESSENTIALS_EVENT_BATCH)
+    plan_prefix = (plan or "free").upper()
 
     def _env_int(key: str, default: int | None = None) -> int:  # noqa: D401
         val = os.getenv(key)
@@ -74,16 +69,15 @@ async def get_me(
         # If we can't count members, default to 1 (assume at least the owner exists)
         member_count = 1
 
+    limits = await get_plan_limits_db(supabase, plan)
     quotas = {
-        "poll_sec": _env_int(
-            f"{plan_prefix}_POLL_SEC",
-            get_plan_limit(plan, "min_poll", account.get("poll_seconds", 60)),
-        ),
+        "poll_sec": int(limits.get("min_poll", 60)),
         "event_batch": _env_int(f"{plan_prefix}_EVENT_BATCH", 1000),
-        "max_tools": get_plan_limit(plan, "max_tools"),
-        "max_members": get_plan_limit(plan, "max_members"),
+        "max_apps": int(limits.get("max_apps", 1)),
+        "max_tools": int(limits.get("max_tools", 10)),
+        "max_members": int(limits.get("max_members", 1)),
         "current_members": member_count,
-        "event_payload_max_bytes": get_plan_limit(plan, "max_batch_bytes"),
+        "event_payload_max_bytes": int(limits.get("max_batch_bytes", 0)),
     }
 
     # -------------------------------------------------------------------
@@ -177,7 +171,7 @@ async def get_me(
         plan=plan,
         trial_expires=account.get("trial_expires"),
         quotas=quotas,
-        metrics_enabled=account.get("metrics_enabled", False),
+        metrics_enabled=True,  # always on (flag deprecated, plan-driven)
         poll_seconds=quotas["poll_sec"],
         event_sample=merged,
         account_id=auth.account_id,

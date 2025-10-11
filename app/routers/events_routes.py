@@ -12,7 +12,7 @@ from app.models import AuthContext, EventRecord, MessageResponse
 from app.models.events import EventIngest
 from app.utils.database import query_one
 from app.utils.dependencies import get_supabase_async
-from app.utils.plans import effective_plan, enforce_event_limits
+from app.utils.plans import resolve_plan_name, enforce_event_limits
 from app.utils.auth import require_auth
 from datetime import datetime, timezone
 
@@ -58,8 +58,8 @@ async def ingest_events(
     # ---------------------------------------------------------------------
     # Fetch account plan & enforce limits
     account = await query_one(supabase, "accounts", match={"id": auth.account_id})
-    plan = effective_plan(account)
-    enforce_event_limits(auth.account_id, plan, payload_size=len(batch_json))
+    plan = await resolve_plan_name(supabase, account)
+    await enforce_event_limits(supabase, auth.account_id, plan, payload_size=len(batch_json))
 
     # Optional downstream export to Logflare → ClickHouse. If no API key is
     # configured we simply store the events in Supabase and rely on the cron

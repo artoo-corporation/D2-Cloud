@@ -1,32 +1,91 @@
 import time
-from app.utils.plans import enforce_event_limits, enforce_bundle_poll, get_plan_limit
+import pytest
+from app.utils.plans import enforce_event_limits, enforce_bundle_poll
+from tests.supabase_stub import SupabaseStub
 from fastapi import HTTPException, status
 
 ACCOUNT = "acct_test"
 
 
-def test_event_size_cap():
-    big = get_plan_limit("free", "max_batch_bytes") + 1
-    try:
-        enforce_event_limits(ACCOUNT, "trial", big)
-    except HTTPException as exc:
-        assert exc.status_code == status.HTTP_413_REQUEST_ENTITY_TOO_LARGE
-    else:
-        assert False, "expected HTTPException"
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+class DummySupabase(SupabaseStub):
+    """Supabase stub where the `table().select().execute()` chain yields data.
+
+    We only need the minimal surface for query_one in plans helpers which
+    ultimately calls `supabase.table(...).select(...).eq(...).execute()`.
+    """
+
+    _data: list[dict] = []
+
+    def __init__(self, row: dict | None = None):
+        self._data = [row] if row else []
+
+    async def execute(self, *_, **__):  # noqa: D401 – stub method
+        class _Resp:  # minimal response object
+            def __init__(self, data):
+                self.data = data
+
+        return _Resp(self._data)
 
 
-def test_event_interval_throttle(monkeypatch):
-    # first call OK, second within interval 429
-    enforce_event_limits(ACCOUNT, "essentials", 10)
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_event_size_cap(monkeypatch):
+    """enforce_event_limits should raise 413 when payload size exceeds plan cap."""
+
+    # Plan row with 100-byte batch cap
+    supabase = DummySupabase({
+        "name": "free",
+        "max_batch_bytes": 100,
+    })
+
+    # Patch query_one to return our dummy row regardless of args
+    async def _query_one(_supabase, *_a, **_k):
+        return supabase._data[0]
+
+    monkeypatch.setattr("app.utils.database.query_one", _query_one)
+
+    big_payload = 101  # 1 byte over limit
+
+    with pytest.raises(HTTPException) as exc:
+        await enforce_event_limits(supabase, ACCOUNT, "free", big_payload)
+
+    assert exc.value.status_code == status.HTTP_413_REQUEST_ENTITY_TOO_LARGE
+
+
+@pytest.mark.asyncio
+async def test_event_interval_throttle(monkeypatch):
+    """Second call within ingest_interval should raise 429."""
+
+    supabase = DummySupabase({
+        "name": "essentials",
+        "ingest_interval": 60,
+    })
+
+    async def _query_one(_supabase, *_a, **_k):
+        return supabase._data[0]
+
+    monkeypatch.setattr("app.utils.database.query_one", _query_one)
+
+    # First call OK
+    await enforce_event_limits(supabase, ACCOUNT, "essentials", 10)
+
+    # Freeze time to simulate immediate retry
     now = time.time()
-    monkeypatch.setattr(time, "time", lambda: now)  # immediate retry
-    try:
-        enforce_event_limits(ACCOUNT, "essentials", 10)
-    except HTTPException as exc:
-        assert exc.status_code == status.HTTP_429_TOO_MANY_REQUESTS
-        assert "Retry-After" in exc.headers
-    else:
-        assert False
+    monkeypatch.setattr(time, "time", lambda: now)
+
+    with pytest.raises(HTTPException) as exc:
+        await enforce_event_limits(supabase, ACCOUNT, "essentials", 10)
+
+    assert exc.value.status_code == status.HTTP_429_TOO_MANY_REQUESTS
+    assert "Retry-After" in exc.value.headers
 
 
 def test_bundle_poll_throttle(monkeypatch):

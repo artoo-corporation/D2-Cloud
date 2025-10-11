@@ -61,8 +61,8 @@ async def create_invitation(
     from app.utils.database import query_one as db_query_one
     account = await db_query_one(supabase, "accounts", match={"id": auth.account_id})
     if account:
-        from app.utils.plans import enforce_member_limits, effective_plan
-        current_plan = effective_plan(account)
+        from app.utils.plans import enforce_member_limits, resolve_plan_name
+        current_plan = await resolve_plan_name(supabase, account)
         await enforce_member_limits(supabase, auth.account_id, current_plan)
     
     # Check if user already exists in the account
@@ -394,8 +394,8 @@ async def accept_invitation(
     # because the plan could have changed or other users might have been added
     account = await query_one(supabase, "accounts", match={"id": invitation["account_id"]})
     if account:
-        from app.utils.plans import enforce_member_limits, effective_plan
-        current_plan = effective_plan(account)
+        from app.utils.plans import enforce_member_limits, resolve_plan_name
+        current_plan = await resolve_plan_name(supabase, account)
         await enforce_member_limits(supabase, invitation["account_id"], current_plan)
     
     # Add user to the account

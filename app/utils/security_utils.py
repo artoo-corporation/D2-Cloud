@@ -418,22 +418,48 @@ def decrypt_private_jwk(blob: str | Dict[str, Any]) -> Dict[str, Any]:
     if isinstance(blob, dict):
         return blob
 
-    key = _get_aes_key()
-
     # Might be a plain JSON string – attempt to parse
     try:
         data = json.loads(blob)
-        if isinstance(data, dict) and data.get("__plain__"):
-            return data["jwk"]
+        if isinstance(data, dict):
+            # Accept both marked plain format and raw JWK dicts (legacy rows)
+            if data.get("__plain__"):
+                return data["jwk"]
+            return data
     except json.JSONDecodeError:
         pass  # Encrypted or malformed
 
     # Encrypted path
+    # Accept both standard and urlsafe base64 encodings (legacy compatibility)
+    decode_mode = "urlsafe"
+    try:
+        raw = base64.urlsafe_b64decode(blob.encode())
+    except Exception:
+        decode_mode = "standard"
+        raw = base64.b64decode(blob.encode())
+
+    if len(raw) < 12 + 16:  # nonce (12) + at least tag (16)
+        raise RuntimeError("Invalid encrypted JWK payload")
+
+    nonce, ciphertext = raw[:12], raw[12:]
+
+    # Key retrieval after decoding so we can still log sizes even if key missing
+    key = _get_aes_key()
+
+    # Optional diagnostics (no secrets) – enable with DEBUG_JWK_CRYPTO=1
+    if os.getenv("DEBUG_JWK_CRYPTO") == "1":
+        try:
+            from app.utils.logger import logger  # local import to avoid heavy deps
+            logger.info(
+                "decrypt_private_jwk diagnostics: blob_chars=%s decode=%s raw_len=%s nonce_len=%s cipher_len=%s key_present=%s key_len=%s",
+                len(blob), decode_mode, len(raw), len(nonce), len(ciphertext), bool(key), (len(key) if key else 0),
+            )
+        except Exception:
+            pass
+
     if key is None:
         raise RuntimeError("Encrypted JWK but JWK_AES_KEY not set")
 
-    raw = base64.b64decode(blob.encode())
-    nonce, ciphertext = raw[:12], raw[12:]
     aes = AESGCM(key)
     plaintext = aes.decrypt(nonce, ciphertext, None)
     return json.loads(plaintext.decode())

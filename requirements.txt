@@ -50,3 +50,4 @@ typing_extensions==4.14.1
 uvicorn==0.29.0
 websockets==15.0.1
 wrapt==1.17.2
+stripe==11.2.0
