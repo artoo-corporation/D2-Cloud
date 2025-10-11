@@ -140,11 +140,7 @@ async def stripe_webhook(
     # Log that we successfully received and parsed the webhook
     # This helps with debugging and monitoring webhook delivery
     logger.info(
-        "stripe.webhook.received",
-        extra={
-            "event_type": event_type,  # What type of event (subscription.created, etc.)
-            "event_id": event_id,      # Stripe's unique event identifier
-        },
+        f"stripe.webhook.received event_type={event_type} event_id={event_id}"
     )
 
     # STEP 6: HELPER FUNCTIONS
@@ -335,7 +331,8 @@ async def stripe_webhook(
                         # =============================
                         # We need the customer's email to find their account
                         customer_id = getattr(subscription, "customer", None) or subscription.get("customer")
-                        logger.info("stripe.webhook.extracting_customer", extra={"customer_id": customer_id, "subscription_id": getattr(subscription, "id", None)})
+                        sub_id = getattr(subscription, "id", None) or subscription.get("id") if isinstance(subscription, dict) else None
+                        logger.info(f"stripe.webhook.extracting_customer customer_id={customer_id} subscription_id={sub_id}")
                         customer = None
                         if customer_id:
                             try:
@@ -391,7 +388,7 @@ async def stripe_webhook(
         # =======================================
         # Log events we don't handle yet (for future expansion)
         else:
-            logger.info("stripe.webhook.unhandled", extra={"event_type": event_type})
+            logger.info(f"stripe.webhook.unhandled event_type={event_type}")
 
     except Exception as e:
         # STEP 8.5: CATCH-ALL ERROR HANDLING
